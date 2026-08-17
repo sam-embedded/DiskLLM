@@ -10,7 +10,8 @@ typedef struct {
     
     // KV Cache for 16 Attention layers
     // Shape: [16, context_length, 2 (K and V), 1024]
-    float *kv_cache;
+    // Quantized to FP16 (uint16_t) to save memory
+    uint16_t *kv_cache;
     size_t kv_cache_size; // in bytes
 
     // SSM Recurrent State for 48 SSM layers
@@ -19,7 +20,7 @@ typedef struct {
     size_t ssm_states_size; // in bytes
 
     // SSM Convolution History for 48 SSM layers
-    // Shape: [48, 3, 10240]
+    // Shape: [48, 3, 6144]
     float *ssm_conv_histories;
     size_t ssm_conv_histories_size; // in bytes
 } model_state;

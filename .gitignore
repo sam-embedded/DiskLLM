@@ -3,6 +3,7 @@ build/
 gguf_dump
 tensor_map
 probe_model
+bench_stream
 
 # OS-specific
 .DS_Store
