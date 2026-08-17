@@ -1,0 +1,6 @@
+# Build artifacts
+build/
+gguf_dump
+
+# OS-specific
+.DS_Store
