@@ -1,6 +1,7 @@
 # Build artifacts
 build/
 gguf_dump
+tensor_map
 
 # OS-specific
 .DS_Store
