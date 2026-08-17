@@ -1,7 +1,7 @@
 CC = cc
-CFLAGS = -std=c11 -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
+CFLAGS = -std=c11 -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -Iinclude
 
-all: gguf_dump tensor_map
+all: gguf_dump tensor_map probe_model
 
 gguf_dump: tools/gguf_dump.c
 	$(CC) $(CFLAGS) $< -o $@
@@ -9,5 +9,8 @@ gguf_dump: tools/gguf_dump.c
 tensor_map: tools/tensor_map.c
 	$(CC) $(CFLAGS) $< -o $@
 
+probe_model: tools/probe_model.c src/state.c src/scratch.c
+	$(CC) $(CFLAGS) $^ -o $@
+
 clean:
-	rm -f gguf_dump tensor_map
+	rm -f gguf_dump tensor_map probe_model

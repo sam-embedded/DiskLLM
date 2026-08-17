@@ -2,6 +2,7 @@
 build/
 gguf_dump
 tensor_map
+probe_model
 
 # OS-specific
 .DS_Store
