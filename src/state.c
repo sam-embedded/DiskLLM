@@ -6,9 +6,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-model_state *allocate_model_state(int context_length) {
-    if (context_length <= 0) {
-        fprintf(stderr, "Error: Invalid context length %d\n", context_length);
+model_state *allocate_model_state(const qwen_model_config *cfg, int context_length) {
+    if (context_length <= 0 || !cfg) {
+        fprintf(stderr, "Error: Invalid context length %d or null config\n", context_length);
         return NULL;
     }
 
@@ -19,45 +19,64 @@ model_state *allocate_model_state(int context_length) {
     }
 
     state->context_length = context_length;
+    state->kv_dim = cfg->num_kv_heads * cfg->key_length;
+    state->ssm_inner_size = cfg->ssm_inner_size;
+    state->ssm_state_size = cfg->ssm_state_size;
+    state->ssm_conv_dim = cfg->ssm_inner_size + 2 * (cfg->ssm_group_count * cfg->ssm_state_size);
+    state->ssm_num_v_heads = cfg->ssm_time_step_rank;
+
+    int attn_count = 0;
+    int ssm_count = 0;
+    for (int b = 0; b < cfg->block_count; b++) {
+        if (cfg->layer_types[b] == LAYER_TYPE_ATTENTION) {
+            state->layer_to_attn_idx[b] = attn_count++;
+            state->layer_to_ssm_idx[b] = -1;
+        } else if (cfg->layer_types[b] == LAYER_TYPE_SSM) {
+            state->layer_to_ssm_idx[b] = ssm_count++;
+            state->layer_to_attn_idx[b] = -1;
+        } else {
+            state->layer_to_attn_idx[b] = -1;
+            state->layer_to_ssm_idx[b] = -1;
+        }
+    }
 
     // 1. Allocate KV cache
-    // Shape: [16, context_length, 2, 1024]
-    // Allocated as uint16_t (FP16) to save memory
-    state->kv_cache_size = 16ULL * (size_t)context_length * 2ULL * 1024ULL * sizeof(uint16_t);
-    int ret = posix_memalign((void **)&state->kv_cache, 64, state->kv_cache_size);
-    if (ret != 0 || !state->kv_cache) {
-        fprintf(stderr, "Error: Failed to allocate KV cache of size %" PRIu64 " bytes.\n", (uint64_t)state->kv_cache_size);
-        free(state);
-        return NULL;
+    if (attn_count > 0 && state->kv_dim > 0) {
+        state->kv_cache_size = (size_t)attn_count * (size_t)context_length * 2ULL * (size_t)state->kv_dim * sizeof(uint16_t);
+        int ret = posix_memalign((void **)&state->kv_cache, 64, state->kv_cache_size);
+        if (ret != 0 || !state->kv_cache) {
+            fprintf(stderr, "Error: Failed to allocate KV cache of size %" PRIu64 " bytes.\n", (uint64_t)state->kv_cache_size);
+            free(state);
+            return NULL;
+        }
+        memset(state->kv_cache, 0, state->kv_cache_size);
     }
-    // Zero-initialize the allocated buffer
-    memset(state->kv_cache, 0, state->kv_cache_size);
 
     // 2. Allocate SSM Recurrent States
-    // Shape: [48, 6144, 128]
-    state->ssm_states_size = 48ULL * 6144ULL * 128ULL * sizeof(float);
-    ret = posix_memalign((void **)&state->ssm_states, 64, state->ssm_states_size);
-    if (ret != 0 || !state->ssm_states) {
-        fprintf(stderr, "Error: Failed to allocate SSM recurrent states of size %" PRIu64 " bytes.\n", (uint64_t)state->ssm_states_size);
-        free(state->kv_cache);
-        free(state);
-        return NULL;
-    }
-    memset(state->ssm_states, 0, state->ssm_states_size);
+    if (ssm_count > 0 && cfg->ssm_inner_size > 0 && cfg->ssm_state_size > 0) {
+        state->ssm_states_size = (size_t)ssm_count * (size_t)cfg->ssm_time_step_rank * (size_t)cfg->ssm_state_size * (size_t)cfg->ssm_state_size * sizeof(float);
+        int ret = posix_memalign((void **)&state->ssm_states, 64, state->ssm_states_size);
+        if (ret != 0 || !state->ssm_states) {
+            fprintf(stderr, "Error: Failed to allocate SSM recurrent states of size %" PRIu64 " bytes.\n", (uint64_t)state->ssm_states_size);
+            if (state->kv_cache) free(state->kv_cache);
+            free(state);
+            return NULL;
+        }
+        memset(state->ssm_states, 0, state->ssm_states_size);
 
-    // 3. Allocate SSM Convolution Histories
-    // Shape: [48, 3, 10240]
-    // Note: conv kernel is 4, so history stores (4 - 1) = 3 states
-    state->ssm_conv_histories_size = 48ULL * 3ULL * 10240ULL * sizeof(float);
-    ret = posix_memalign((void **)&state->ssm_conv_histories, 64, state->ssm_conv_histories_size);
-    if (ret != 0 || !state->ssm_conv_histories) {
-        fprintf(stderr, "Error: Failed to allocate SSM conv history of size %" PRIu64 " bytes.\n", (uint64_t)state->ssm_conv_histories_size);
-        free(state->ssm_states);
-        free(state->kv_cache);
-        free(state);
-        return NULL;
+        // 3. Allocate SSM Convolution Histories
+        int conv_hist_len = (cfg->ssm_conv_kernel > 1) ? (cfg->ssm_conv_kernel - 1) : 3;
+        state->ssm_conv_histories_size = (size_t)ssm_count * (size_t)conv_hist_len * (size_t)state->ssm_conv_dim * sizeof(float);
+        ret = posix_memalign((void **)&state->ssm_conv_histories, 64, state->ssm_conv_histories_size);
+        if (ret != 0 || !state->ssm_conv_histories) {
+            fprintf(stderr, "Error: Failed to allocate SSM conv history of size %" PRIu64 " bytes.\n", (uint64_t)state->ssm_conv_histories_size);
+            if (state->ssm_states) free(state->ssm_states);
+            if (state->kv_cache) free(state->kv_cache);
+            free(state);
+            return NULL;
+        }
+        memset(state->ssm_conv_histories, 0, state->ssm_conv_histories_size);
     }
-    memset(state->ssm_conv_histories, 0, state->ssm_conv_histories_size);
 
     return state;
 }

@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
 
     // 1. Allocate scratch buffers (for the 128 MiB stream buffer)
     printf("Allocating scratch buffers (128 MiB)...\n");
-    scratch_buffers *scratch = allocate_scratch_buffers();
+    scratch_buffers *scratch = allocate_scratch_buffers(NULL);
     if (!scratch) {
         fprintf(stderr, "FAIL: Scratch buffers allocation failed.\n");
         return 1;

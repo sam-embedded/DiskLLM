@@ -8,7 +8,9 @@
 #define _LARGEFILE64_SOURCE
 #endif
 
+#include "model_config.h"
 #include "tensor_catalog.h"
+#include "layer_map.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -535,5 +537,282 @@ int search_token(const char *filepath, const char *query) {
     fclose(f);
     return -1;
 }
+
+int get_metadata_float(const char *filepath, const char *key, float *out_val) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return -1;
+
+    struct {
+        char magic[4];
+        uint32_t version;
+        uint64_t tensor_count;
+        uint64_t metadata_kv_count;
+    } header;
+
+    if (fread(&header, 1, sizeof(header), f) != sizeof(header) || strncmp(header.magic, "GGUF", 4) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    for (uint64_t i = 0; i < header.metadata_kv_count; i++) {
+        uint64_t key_len;
+        if (fread(&key_len, 8, 1, f) != 1) { fclose(f); return -1; }
+        char *k = malloc(key_len + 1);
+        if (fread(k, 1, key_len, f) != key_len) { free(k); fclose(f); return -1; }
+        k[key_len] = '\0';
+
+        uint32_t val_type;
+        if (fread(&val_type, 4, 1, f) != 1) { free(k); fclose(f); return -1; }
+
+        if (strcmp(k, key) == 0) {
+            free(k);
+            if (val_type == G_TYPE_FLOAT32) {
+                float val;
+                if (fread(&val, 4, 1, f) == 1) { *out_val = val; fclose(f); return 0; }
+            } else if (val_type == G_TYPE_FLOAT64) {
+                double val;
+                if (fread(&val, 8, 1, f) == 1) { *out_val = (float)val; fclose(f); return 0; }
+            }
+            fclose(f);
+            return -1;
+        } else {
+            skip_val(f, val_type);
+        }
+        free(k);
+    }
+
+    fclose(f);
+    return -1;
+}
+
+int get_metadata_string(const char *filepath, const char *key, char *out_str, size_t max_len) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return -1;
+
+    struct {
+        char magic[4];
+        uint32_t version;
+        uint64_t tensor_count;
+        uint64_t metadata_kv_count;
+    } header;
+
+    if (fread(&header, 1, sizeof(header), f) != sizeof(header) || strncmp(header.magic, "GGUF", 4) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    for (uint64_t i = 0; i < header.metadata_kv_count; i++) {
+        uint64_t key_len;
+        if (fread(&key_len, 8, 1, f) != 1) { fclose(f); return -1; }
+        char *k = malloc(key_len + 1);
+        if (fread(k, 1, key_len, f) != key_len) { free(k); fclose(f); return -1; }
+        k[key_len] = '\0';
+
+        uint32_t val_type;
+        if (fread(&val_type, 4, 1, f) != 1) { free(k); fclose(f); return -1; }
+
+        if (strcmp(k, key) == 0) {
+            free(k);
+            if (val_type == G_TYPE_STRING) {
+                uint64_t str_len;
+                if (fread(&str_len, 8, 1, f) != 1) { fclose(f); return -1; }
+                size_t to_copy = (str_len < max_len - 1) ? str_len : max_len - 1;
+                if (fread(out_str, 1, to_copy, f) != to_copy) { fclose(f); return -1; }
+                out_str[to_copy] = '\0';
+                fclose(f);
+                return 0;
+            }
+            fclose(f);
+            return -1;
+        } else {
+            skip_val(f, val_type);
+        }
+        free(k);
+    }
+
+    fclose(f);
+    return -1;
+}
+
+qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_catalog *cat, const char *arch_flag_str) {
+    qwen_model_config *cfg = calloc(1, sizeof(qwen_model_config));
+    if (!cfg) return NULL;
+
+    /* 1. Read architecture name */
+    if (get_metadata_string(filepath, "general.architecture", cfg->architecture, sizeof(cfg->architecture)) != 0) {
+        strncpy(cfg->architecture, "qwen35", sizeof(cfg->architecture) - 1);
+    }
+    if (get_metadata_string(filepath, "general.name", cfg->model_name, sizeof(cfg->model_name)) != 0) {
+        get_metadata_string(filepath, "general.basename", cfg->model_name, sizeof(cfg->model_name));
+    }
+
+    char key_buf[256];
+    #define GET_U32(field, subkey, fallback_val) do { \
+        snprintf(key_buf, sizeof(key_buf), "%s.%s", cfg->architecture, subkey); \
+        uint32_t v; \
+        if (get_metadata_uint32(filepath, key_buf, &v) == 0) { \
+            field = (int)v; \
+        } else { \
+            snprintf(key_buf, sizeof(key_buf), "qwen35.%s", subkey); \
+            if (get_metadata_uint32(filepath, key_buf, &v) == 0) { \
+                field = (int)v; \
+            } else { \
+                snprintf(key_buf, sizeof(key_buf), "qwen2.%s", subkey); \
+                if (get_metadata_uint32(filepath, key_buf, &v) == 0) { \
+                    field = (int)v; \
+                } else { \
+                    field = fallback_val; \
+                } \
+            } \
+        } \
+    } while(0)
+
+    #define GET_FLT(field, subkey, fallback_val) do { \
+        snprintf(key_buf, sizeof(key_buf), "%s.%s", cfg->architecture, subkey); \
+        float v; \
+        if (get_metadata_float(filepath, key_buf, &v) == 0) { \
+            field = v; \
+        } else { \
+            snprintf(key_buf, sizeof(key_buf), "qwen35.%s", subkey); \
+            if (get_metadata_float(filepath, key_buf, &v) == 0) { \
+                field = v; \
+            } else { \
+                snprintf(key_buf, sizeof(key_buf), "qwen2.%s", subkey); \
+                if (get_metadata_float(filepath, key_buf, &v) == 0) { \
+                    field = v; \
+                } else { \
+                    field = fallback_val; \
+                } \
+            } \
+        } \
+    } while(0)
+
+    GET_U32(cfg->block_count, "block_count", 0);
+    GET_U32(cfg->hidden_dim, "embedding_length", 5120);
+    GET_U32(cfg->ffn_dim, "feed_forward_length", 17408);
+    GET_U32(cfg->num_attn_heads, "attention.head_count", 24);
+    GET_U32(cfg->num_kv_heads, "attention.head_count_kv", 4);
+    GET_U32(cfg->key_length, "attention.key_length", 256);
+    GET_U32(cfg->value_length, "attention.value_length", 256);
+    cfg->head_dim = cfg->key_length;
+
+    GET_FLT(cfg->rope_freq_base, "rope.freq_base", 10000000.0f);
+    GET_U32(cfg->rope_dim, "rope.dimension_count", 64);
+
+    GET_U32(cfg->ssm_conv_kernel, "ssm.conv_kernel", 4);
+    GET_U32(cfg->ssm_state_size, "ssm.state_size", 128);
+    GET_U32(cfg->ssm_group_count, "ssm.group_count", 16);
+    GET_U32(cfg->ssm_time_step_rank, "ssm.time_step_rank", 48);
+    GET_U32(cfg->ssm_inner_size, "ssm.inner_size", 6144);
+    GET_U32(cfg->full_attn_interval, "full_attention_interval", 4);
+
+    #undef GET_U32
+    #undef GET_FLT
+
+    /* 2. Special Tokens */
+    cfg->eos_token_id = 248046;
+    cfg->bos_token_id = 248044;
+    get_metadata_uint32(filepath, "tokenizer.ggml.eos_token_id", &cfg->eos_token_id);
+    get_metadata_uint32(filepath, "tokenizer.ggml.bos_token_id", &cfg->bos_token_id);
+
+    /* 3. Vocab Size from token_embd.weight shape */
+    const tensor_info *ti_emb = find_tensor(cat, "token_embd.weight");
+    if (ti_emb && ti_emb->n_dims >= 2) {
+        cfg->vocab_size = (int)ti_emb->dims[1];
+    } else {
+        cfg->vocab_size = 248320;
+    }
+
+    /* 4. Tied embedding check */
+    const tensor_info *ti_out = find_tensor(cat, "output.weight");
+    if (!ti_out && ti_emb) {
+        cfg->is_tied_embedding = 1;
+    } else {
+        cfg->is_tied_embedding = 0;
+    }
+
+    /* 5. Detect Block Count and Layer Types */
+    int max_blk = -1;
+    int has_ssm_tensors = 0;
+    int has_attn_tensors = 0;
+
+    for (int i = 0; i < cat->count; i++) {
+        const char *name = cat->tensors[i].name;
+        if (strncmp(name, "blk.", 4) == 0) {
+            int b = atoi(name + 4);
+            if (b >= 0 && b < 1024) {
+                if (b > max_blk) max_blk = b;
+            }
+        }
+    }
+
+    int detected_blocks = max_blk + 1;
+    if (cfg->block_count == 0 || detected_blocks < cfg->block_count) {
+        cfg->block_count = detected_blocks;
+    }
+
+    if (cfg->block_count > 0) {
+        char test_nm[256];
+        snprintf(test_nm, sizeof(test_nm), "blk.%d.ffn_gate.weight", cfg->block_count - 1);
+        if (!find_tensor(cat, test_nm) && cfg->block_count > 1) {
+            snprintf(test_nm, sizeof(test_nm), "blk.%d.nextn.eh_proj.weight", cfg->block_count - 1);
+            if (find_tensor(cat, test_nm)) {
+                cfg->block_count--;
+            }
+        }
+    }
+
+    /* Classify layer types for each block */
+    cfg->num_ssm_layers = 0;
+    cfg->num_attn_layers = 0;
+    cfg->has_nextn = 0;
+
+    for (int b = 0; b < cfg->block_count; b++) {
+        cfg->layer_types[b] = classify_layer_type(cat, b);
+        if (cfg->layer_types[b] == LAYER_TYPE_SSM) {
+            has_ssm_tensors = 1;
+            cfg->num_ssm_layers++;
+        } else if (cfg->layer_types[b] == LAYER_TYPE_ATTENTION) {
+            has_attn_tensors = 1;
+            cfg->num_attn_layers++;
+        }
+
+        char nm[256];
+        snprintf(nm, sizeof(nm), "blk.%d.nextn.eh_proj.weight", b);
+        if (find_tensor(cat, nm) != NULL) {
+            cfg->layer_has_nextn[b] = 1;
+            cfg->has_nextn = 1;
+        } else {
+            cfg->layer_has_nextn[b] = 0;
+        }
+    }
+    char nextn_top[256];
+    snprintf(nextn_top, sizeof(nextn_top), "blk.%d.nextn.eh_proj.weight", cfg->block_count);
+    if (find_tensor(cat, nextn_top) != NULL) {
+        cfg->has_nextn = 1;
+    }
+
+    /* 6. Model Type Auto Detection */
+    if (arch_flag_str && !strcmp(arch_flag_str, "qwen-hybrid")) {
+        cfg->model_type = MODEL_TYPE_QWEN_HYBRID;
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-attention")) {
+        cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
+    } else {
+        if (has_ssm_tensors) {
+            cfg->model_type = MODEL_TYPE_QWEN_HYBRID;
+        } else if (has_attn_tensors) {
+            cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
+        } else {
+            cfg->model_type = MODEL_TYPE_UNSUPPORTED;
+        }
+    }
+
+    return cfg;
+}
+
+void free_qwen_model_config(qwen_model_config *cfg) {
+    if (cfg) free(cfg);
+}
+
 
 

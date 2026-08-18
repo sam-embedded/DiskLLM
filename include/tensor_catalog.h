@@ -24,6 +24,8 @@ const tensor_info *find_tensor(const tensor_catalog *catalog, const char *name);
 
 int lookup_token_by_id(const char *filepath, uint32_t target_id, char *out_str, size_t max_len);
 int get_metadata_uint32(const char *filepath, const char *key, uint32_t *out_val);
+int get_metadata_float(const char *filepath, const char *key, float *out_val);
+int get_metadata_string(const char *filepath, const char *key, char *out_str, size_t max_len);
 int search_token(const char *filepath, const char *query);
 
 #endif // TENSOR_CATALOG_H

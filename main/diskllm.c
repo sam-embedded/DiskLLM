@@ -12,9 +12,11 @@
 #include "sampler.h"
 #include "stream.h"
 #include "tokenizer.h"
+#include "model_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -70,7 +72,7 @@ typedef struct {
     int32_t  pos;                // sequence position
     int32_t  prompt_len;         // total tokens processed
     int32_t  context_size;       // context capacity
-    int32_t  hidden_dim;         // 5120
+    int32_t  hidden_dim;         // e.g. 5120 or 1024
     uint64_t kv_cache_bytes;     // kv cache size
     uint64_t ssm_state_bytes;    // ssm states size
     uint64_t ssm_conv_bytes;     // ssm conv history size
@@ -79,12 +81,12 @@ typedef struct {
     int32_t  reserved[6];
 } diskllm_state_header;
 
-static int load_layer_block_weights(int fd, const tensor_catalog *cat, int li,
+static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwen_model_config *cfg, int li,
                                      uint8_t *buf, layer_block_weights *blk,
                                      uint64_t *ctr) {
     char nm[256];
     uint8_t *p = buf;
-    blk->l_type = get_layer_type(li);
+    blk->l_type = cfg->layer_types[li];
 
 #define LOAD(field, name_fmt, type_field) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
@@ -100,15 +102,25 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, int li,
     if (load_tensor_to_buf(fd, _ti, p, ctr) != 0) return -1; \
     field = (const float *)p; p += _ti->byte_size; \
 } while(0)
+#define LOAD_NORM_OPTIONAL(field, name_fmt) do { \
+    snprintf(nm, sizeof(nm), name_fmt, li); \
+    const tensor_info *_ti = find_tensor(cat, nm); \
+    if (_ti) { \
+        if (load_tensor_to_buf(fd, _ti, p, ctr) != 0) return -1; \
+        field = (const float *)p; p += _ti->byte_size; \
+    } else { \
+        field = NULL; \
+    } \
+} while(0)
 
     if (blk->l_type == LAYER_TYPE_ATTENTION) {
-        LOAD_NORM(blk->u.attn.attn_norm_w,    "blk.%d.attn_norm.weight");
-        LOAD(blk->u.attn.attn_q_w,            "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
-        LOAD_NORM(blk->u.attn.attn_q_norm_w,  "blk.%d.attn_q_norm.weight");
-        LOAD(blk->u.attn.attn_k_w,            "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
-        LOAD_NORM(blk->u.attn.attn_k_norm_w,  "blk.%d.attn_k_norm.weight");
-        LOAD(blk->u.attn.attn_v_w,            "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
-        LOAD(blk->u.attn.attn_output_w,       "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
+        LOAD_NORM(blk->u.attn.attn_norm_w,               "blk.%d.attn_norm.weight");
+        LOAD(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
+        LOAD_NORM_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
+        LOAD(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
+        LOAD_NORM_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
+        LOAD(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+        LOAD(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
     } else {
         LOAD_NORM(blk->u.ssm.attn_norm_w,     "blk.%d.attn_norm.weight");
         LOAD(blk->u.ssm.attn_qkv_w,           "blk.%d.attn_qkv.weight", blk->u.ssm.attn_qkv_w_type);
@@ -127,14 +139,15 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, int li,
     LOAD(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
 #undef LOAD
 #undef LOAD_NORM
+#undef LOAD_NORM_OPTIONAL
     return 0;
 }
 
-static int load_layer_block_weights_mmap(const tensor_catalog *cat, int li,
+static int load_layer_block_weights_mmap(const tensor_catalog *cat, const qwen_model_config *cfg, int li,
                                           const uint8_t *mmap_base,
                                           layer_block_weights *blk) {
     char nm[256];
-    blk->l_type = get_layer_type(li);
+    blk->l_type = cfg->layer_types[li];
 
 #define LOAD_MMAP(field, name_fmt, type_field) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
@@ -149,15 +162,24 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, int li,
     if (!_ti) { fprintf(stderr, "[ERROR] Missing layer tensor: %s\n", nm); return -1; } \
     field = (const float *)(mmap_base + _ti->absolute_offset); \
 } while(0)
+#define LOAD_NORM_MMAP_OPTIONAL(field, name_fmt) do { \
+    snprintf(nm, sizeof(nm), name_fmt, li); \
+    const tensor_info *_ti = find_tensor(cat, nm); \
+    if (_ti) { \
+        field = (const float *)(mmap_base + _ti->absolute_offset); \
+    } else { \
+        field = NULL; \
+    } \
+} while(0)
 
     if (blk->l_type == LAYER_TYPE_ATTENTION) {
-        LOAD_NORM_MMAP(blk->u.attn.attn_norm_w,    "blk.%d.attn_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_q_w,            "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
-        LOAD_NORM_MMAP(blk->u.attn.attn_q_norm_w,  "blk.%d.attn_q_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_k_w,            "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
-        LOAD_NORM_MMAP(blk->u.attn.attn_k_norm_w,  "blk.%d.attn_k_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_v_w,            "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
-        LOAD_MMAP(blk->u.attn.attn_output_w,       "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
+        LOAD_NORM_MMAP(blk->u.attn.attn_norm_w,               "blk.%d.attn_norm.weight");
+        LOAD_MMAP(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
+        LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
+        LOAD_MMAP(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
+        LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
+        LOAD_MMAP(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+        LOAD_MMAP(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
     } else {
         LOAD_NORM_MMAP(blk->u.ssm.attn_norm_w,     "blk.%d.attn_norm.weight");
         LOAD_MMAP(blk->u.ssm.attn_qkv_w,           "blk.%d.attn_qkv.weight", blk->u.ssm.attn_qkv_w_type);
@@ -176,6 +198,7 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, int li,
     LOAD_MMAP(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
 #undef LOAD_MMAP
 #undef LOAD_NORM_MMAP
+#undef LOAD_NORM_MMAP_OPTIONAL
     return 0;
 }
 
@@ -249,165 +272,112 @@ static float l2_norm(const float *v, int n) {
     return (float)sqrt(s);
 }
 
-static void maybe_print_norm(const float *h, int n, int lid, int flag) {
+static void maybe_print_norm(const float *v, int n, int layer, int flag) {
     if (!flag) return;
-    static const int print_at[] = {-1, 0, 1, 2, 3, 4, 7, 15, 31, 63, 100};
-    for (int k = 0; k < (int)(sizeof(print_at)/sizeof(print_at[0])); k++) {
-        if (print_at[k] == lid) {
-            if (lid == -1) printf("[NORM] emb lookup: %.6f\n", l2_norm(h, n));
-            else if (lid == 100) printf("[NORM] final output_norm: %.6f\n", l2_norm(h, n));
-            else printf("[NORM] after layer %d: %.6f\n", lid, l2_norm(h, n));
-        }
-    }
+    printf("[NORM Layer %2d] L2 = %.6f\n", layer, l2_norm(v, n));
 }
 
-/* ─── Decode token to UTF-8 string ─────────────────────────────────────────── */
-/* BPE artifacts: Ġ = space prefix (U+0120), Ċ = newline (U+010A), etc.
-   We translate these back to their ASCII equivalents. */
-static void __attribute__((unused)) decode_token_string(const char *raw, char *out, size_t out_len) {
-    size_t wi = 0;
-    size_t ri = 0;
-    size_t raw_len = strlen(raw);
-    while (ri < raw_len && wi + 1 < out_len) {
-        unsigned char c = (unsigned char)raw[ri];
-        if (c == 0xC4 && ri + 1 < raw_len) {
-            unsigned char c2 = (unsigned char)raw[ri + 1];
-            if (c2 == 0xA0) { out[wi++] = ' ';  ri += 2; continue; }  // Ġ → space
-            if (c2 == 0x8A) { out[wi++] = '\n'; ri += 2; continue; }  // Ċ → newline
-            if (c2 == 0x89) { out[wi++] = '\t'; ri += 2; continue; }  // ĉ → tab
-        }
-        out[wi++] = (char)c;
-        ri++;
+static void dequantize_row(const uint8_t *src, float *dst, int dim, int type) {
+    if (type == GGML_TYPE_Q4_K) {
+        dequantize_q4_K(src, dst, dim);
+    } else if (type == GGML_TYPE_Q6_K) {
+        dequantize_q6_K(src, dst, dim);
+    } else if (type == GGML_TYPE_Q8_0) {
+        dequantize_q8_0(src, dst, dim);
+    } else if (type == GGML_TYPE_F32) {
+        dequantize_f32(src, dst, dim);
+    } else {
+        dequantize_q4_K(src, dst, dim);
     }
-    out[wi] = '\0';
 }
-
-/* ─── Prefetch thread ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    int fd;
-    const tensor_catalog *cat;
-    int layer_idx;
-    uint8_t *buf;
-    layer_block_weights *blk;
-    uint64_t bytes_read;
-    int status;
+    int                     fd;
+    const tensor_catalog   *cat;
+    const qwen_model_config *cfg;
+    int                     layer_idx;
+    uint8_t                *buf;
+    layer_block_weights    *blk;
+    uint64_t                bytes_read;
+    int                     status;
 } prefetch_args;
 
 static void *prefetch_thread_fn(void *arg) {
     prefetch_args *a = (prefetch_args *)arg;
-    a->status = load_layer_block_weights(a->fd, a->cat, a->layer_idx, a->buf, a->blk, &a->bytes_read);
+    a->status = load_layer_block_weights(a->fd, a->cat, a->cfg, a->layer_idx, a->buf, a->blk, &a->bytes_read);
     return NULL;
 }
 
-/* ─── Logits helpers ─────────────────────────────────────────────────────────── */
+/* ─── Usage ─────────────────────────────────────────────────────────────────── */
 
-static void __attribute__((unused)) print_logits_summary(const float *logits, int n, int step) {
-    float mn = logits[0], mx = logits[0];
-    double sum = 0.0;
-    for (int i = 0; i < n; i++) {
-        if (logits[i] < mn) mn = logits[i];
-        if (logits[i] > mx) mx = logits[i];
-        sum += logits[i];
-    }
-    double mean = sum / n;
-    double ssq = 0.0;
-    for (int i = 0; i < n; i++) { double d = logits[i] - mean; ssq += d*d; }
-    printf("[LOGITS-SUMMARY] step %d: max=%.6f min=%.6f mean=%.6f stddev=%.6f\n",
-           step, mx, mn, (float)mean, (float)sqrt(ssq / n));
+static void print_usage(const char *prog) {
+    printf("DiskLLM — Streaming / Disk-based LLM Inference Engine\n\n");
+    printf("Usage: %s [options]\n\n", prog);
+    printf("Options:\n");
+    printf("  --model <path>              Path to GGUF model file (required)\n");
+    printf("  --arch <auto|qwen-hybrid|qwen-attention> Model architecture mode (default: auto)\n");
+    printf("  --prompt <text>             Input prompt text\n");
+    printf("  --system <text>             System prompt text (for --chat)\n");
+    printf("  --prompt-ids <id1,id2,...>  Input prompt token IDs\n");
+    printf("  --prompt-ids-file <file>    File containing prompt token IDs\n");
+    printf("  --save-state <file>         File path to save execution state\n");
+    printf("  --load-state <file>         File path to load execution state from\n");
+    printf("  --state-info <file>         Print header information of a state file\n");
+    printf("  --print-missing-tensors     Print missing expected tensors for model diagnostics\n");
+    printf("  --context <size>            Context length capacity (default: 4096)\n");
+    printf("  --max-tokens <N>            Maximum number of tokens to generate (default: 128)\n");
+    printf("  --threads, -t <N>           Number of matvec threads (default: CPU cores)\n");
+    printf("  --temp <val>                Sampling temperature (0.0 = greedy, default: 0.0)\n");
+    printf("  --top-k <K>                 Top-K sampling\n");
+    printf("  --top-p <P>                 Top-P nucleus sampling\n");
+    printf("  --min-p <P>                 Min-P sampling\n");
+    printf("  --repeat-penalty <val>      Repetition penalty factor (default: 1.0)\n");
+    printf("  --stop-token <id>           Extra stop token ID (can be repeated)\n");
+    printf("  --chat                      Auto-wrap prompt in Qwen chat template\n");
+    printf("  --warm-cache                 Pre-warm OS page cache for model file\n");
+    printf("  --io-mode <pread|mmap>      I/O streaming mode (default: pread)\n");
+    printf("  --log-io-per-token          Log I/O wait vs compute breakdown per generated token\n");
+    printf("  --profile-decode            Print detailed decode profiling breakdown\n");
+    printf("  --greedy                    Shortcut for --temp 0.0\n");
+    printf("  --quiet                     Suppress progress messages\n");
+    printf("  --help, -h                  Show this help message\n");
 }
 
-/* ─── Usage & State Info ────────────────────────────────────────────────────── */
-
-static int print_state_info(const char *filepath) {
-    FILE *sf = fopen(filepath, "rb");
-    if (!sf) {
-        fprintf(stderr, "Error: Cannot open state file %s\n", filepath);
+static int print_state_info(const char *state_file) {
+    FILE *f = fopen(state_file, "rb");
+    if (!f) {
+        fprintf(stderr, "Error: Cannot open state file %s\n", state_file);
         return 1;
     }
     diskllm_state_header hdr;
-    if (fread(&hdr, sizeof(hdr), 1, sf) != 1) {
-        fprintf(stderr, "Error: Failed to read state header from %s\n", filepath);
-        fclose(sf);
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || memcmp(hdr.magic, "DKST", 4) != 0) {
+        fprintf(stderr, "Error: Invalid state header in %s\n", state_file);
+        fclose(f);
         return 1;
     }
-    fclose(sf);
+    fclose(f);
 
-    if (memcmp(hdr.magic, "DKST", 4) != 0) {
-        fprintf(stderr, "Error: Invalid magic '%.4s' in %s (expected 'DKST')\n", hdr.magic, filepath);
-        return 1;
-    }
-
-    printf("=== DiskLLM State File Info ===\n");
-    printf("File            : %s\n", filepath);
-    printf("Magic           : %.4s\n", hdr.magic);
-    printf("Version         : %u\n", hdr.version);
-    printf("Checksum        : 0x%08X\n", hdr.checksum);
-    printf("Sequence Pos    : %d\n", hdr.pos);
-    printf("Prompt Length   : %d\n", hdr.prompt_len);
-    printf("Context Size    : %d\n", hdr.context_size);
-    printf("Hidden Dim      : %d\n", hdr.hidden_dim);
-    printf("Next Token ID   : %d\n", hdr.next_tok);
-    printf("KV Cache Size   : %llu bytes (%.2f MB)\n", (unsigned long long)hdr.kv_cache_bytes, (double)hdr.kv_cache_bytes / (1024*1024));
-    printf("SSM State Size  : %llu bytes (%.2f MB)\n", (unsigned long long)hdr.ssm_state_bytes, (double)hdr.ssm_state_bytes / (1024*1024));
-    printf("SSM Conv Size   : %llu bytes (%.2f MB)\n", (unsigned long long)hdr.ssm_conv_bytes, (double)hdr.ssm_conv_bytes / (1024*1024));
-    double total_mb = (double)(sizeof(hdr) + hdr.kv_cache_bytes + hdr.ssm_state_bytes + hdr.ssm_conv_bytes + hdr.hidden_dim * sizeof(float)) / (1024 * 1024);
-    printf("Total State Size: %.2f MB\n", total_mb);
+    printf("State File Header Information for: %s\n", state_file);
+    printf("  Magic          : %.4s\n", hdr.magic);
+    printf("  Version        : %u\n", hdr.version);
+    printf("  Position       : %d\n", hdr.pos);
+    printf("  Prompt Length  : %d\n", hdr.prompt_len);
+    printf("  Context Size   : %d\n", hdr.context_size);
+    printf("  Hidden Dim     : %d\n", hdr.hidden_dim);
+    printf("  KV Cache Size  : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.kv_cache_bytes / (1024*1024), hdr.kv_cache_bytes);
+    printf("  SSM State Size : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.ssm_state_bytes / (1024*1024), hdr.ssm_state_bytes);
+    printf("  SSM Conv Size  : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.ssm_conv_bytes / (1024*1024), hdr.ssm_conv_bytes);
+    printf("  Next Token ID  : %d\n", hdr.next_tok);
+    printf("  Checksum       : 0x%08X\n", hdr.checksum);
     return 0;
 }
 
-static void print_usage(const char *prog) {
-    fprintf(stderr, "DiskLLM v1.0.0 — Pure C Disk-Streaming LLM Inference Engine\n\n");
-    fprintf(stderr, "Usage: %s --model <PATH.gguf> [options]\n\n", prog);
-    fprintf(stderr, "Input Options:\n");
-    fprintf(stderr, "  --prompt \"text\"              UTF-8 text prompt to encode and run\n");
-    fprintf(stderr, "  --prompt-ids \"id1,id2\"       Comma-separated prompt token IDs\n");
-    fprintf(stderr, "  --prompt-ids-file <FILE>     File containing prompt token IDs\n");
-    fprintf(stderr, "  --system \"text\"              System prompt (used with --chat)\n");
-    fprintf(stderr, "  --chat                       Apply ChatML formatting tags\n\n");
-    fprintf(stderr, "Generation & Sampling Options:\n");
-    fprintf(stderr, "  --max-tokens N               Max tokens to generate (default: 16)\n");
-    fprintf(stderr, "  --threads N, -t N            Number of compute worker threads (default: 4)\n");
-    fprintf(stderr, "  --context N                  KV cache context size (default: 256)\n");
-    fprintf(stderr, "  --greedy                     Greedy decoding (default)\n");
-    fprintf(stderr, "  --temp T, --temperature T    Sampling temperature (0 = greedy)\n");
-    fprintf(stderr, "  --top-k K                    Top-K filtering (0 = disabled)\n");
-    fprintf(stderr, "  --top-p P                    Top-P nucleus filtering (1.0 = disabled)\n");
-    fprintf(stderr, "  --min-p P                    Min-P filtering (0.0 = disabled)\n");
-    fprintf(stderr, "  --repeat-penalty R           Repetition penalty factor (default: 1.0)\n");
-    fprintf(stderr, "  --seed N                     RNG seed for sampling\n");
-    fprintf(stderr, "  --stop-token ID              Add extra stop token ID\n");
-    fprintf(stderr, "  --show-special-tokens        Print special tokens during decoding\n\n");
-    fprintf(stderr, "State Cache & Persistence:\n");
-    fprintf(stderr, "  --save-state FILE            Save model SSM & KV state to binary file after generation\n");
-    fprintf(stderr, "  --load-state FILE            Load saved SSM & KV state binary file (skips prefill)\n");
-    fprintf(stderr, "  --state-info FILE            Print state file header metadata and exit\n\n");
-    fprintf(stderr, "Storage & Profiling Options:\n");
-    fprintf(stderr, "  --io-mode <pread|mmap>       I/O mode for model weight access (default: pread)\n");
-    fprintf(stderr, "  --prefill-mode <batch|seq>   Prefill mode (default: batch)\n");
-    fprintf(stderr, "  --warm-cache                 Pre-warm OS page cache before inference\n");
-    fprintf(stderr, "  --profile-decode             Print fine-grained per-token decode timing breakdown\n");
-    fprintf(stderr, "  --log-io-per-token           Log logical vs physical disk reads per token\n");
-    fprintf(stderr, "  --print-missing-tensors      Inspect GGUF tensor catalog and report all missing expected tensors\n");
-    fprintf(stderr, "  --quiet                      Suppress informational logs; print ONLY generated text\n");
-    fprintf(stderr, "  --version                    Print version info and exit\n");
-    fprintf(stderr, "  -h, --help                   Show this help message\n\n");
-}
-
-/* ─── Main ───────────────────────────────────────────────────────────────────── */
-
-#define MODEL_HIDDEN 5120
-#define MODEL_FFN    17408
-#define MODEL_VOCAB  248320
-#define MODEL_EMBED_ROW_Q4K  2880   /* 5120/256 blocks * 144 bytes */
-#define MODEL_LOGIT_ROW_Q6K  4200   /* 5120/256 blocks * 210 bytes */
-#define MODEL_LAYERS 64
-
-static void run_missing_tensor_diagnostics(const tensor_catalog *cat) {
+static void run_missing_tensor_diagnostics(const tensor_catalog *cat, const qwen_model_config *cfg) {
     printf("=== DiskLLM Missing Tensor Diagnostics ===\n");
-    printf("Loaded GGUF catalog containing %d tensors.\n\n", cat->count);
+    printf("Loaded GGUF catalog containing %d tensors.\n", cat->count);
+    printf("Model Name : %s\n", cfg->model_name);
+    printf("Architecture : %s\n\n", cfg->architecture);
 
-    /* 1. Core tensors resolution */
     const char *core_tensors[] = {
         "token_embd.weight",
         "output_norm.weight",
@@ -419,56 +389,29 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat) {
         const tensor_info *ti = find_tensor(cat, core_tensors[i]);
         if (ti) {
             printf("  [FOUND]   %-32s (type %d, offset %llu)\n", core_tensors[i], ti->type, (unsigned long long)ti->absolute_offset);
+        } else if (!strcmp(core_tensors[i], "output.weight") && cfg->is_tied_embedding) {
+            printf("  [TIED]    %-32s (tied to token_embd.weight)\n", core_tensors[i]);
         } else {
             printf("  [MISSING] %-32s\n", core_tensors[i]);
             missing_core_count++;
         }
     }
 
-    /* 2. Block detection */
-    int block_present[1024] = {0};
-    int max_block = -1;
-    int num_blocks_found = 0;
-    int has_ssm = 0;
-    int has_nextn = 0;
-
-    for (int i = 0; i < cat->count; i++) {
-        const char *name = cat->tensors[i].name;
-        if (strstr(name, ".ssm_") != NULL) has_ssm = 1;
-        if (strstr(name, ".nextn.") != NULL) has_nextn = 1;
-
-        if (strncmp(name, "blk.", 4) == 0) {
-            int blk_idx = atoi(name + 4);
-            if (blk_idx >= 0 && blk_idx < 1024) {
-                if (!block_present[blk_idx]) {
-                    block_present[blk_idx] = 1;
-                    num_blocks_found++;
-                    if (blk_idx > max_block) max_block = blk_idx;
-                }
-            }
-        }
-    }
-
     printf("\n--- Architecture Feature Inspection ---\n");
-    if (num_blocks_found > 0) {
-        printf("  Detected Block Count : %d (indices 0..%d)\n", num_blocks_found, max_block);
-    } else {
-        printf("  Detected Block Count : 0\n");
-    }
-    printf("  SSM Tensors Exist    : %s\n", has_ssm ? "YES" : "NO");
-    printf("  NextN Tensors Exist  : %s\n", has_nextn ? "YES" : "NO");
+    printf("  Model Type           : %s\n",
+           cfg->model_type == MODEL_TYPE_QWEN_HYBRID ? "MODEL_TYPE_QWEN_HYBRID" :
+           cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY ? "MODEL_TYPE_QWEN_ATTENTION_ONLY" : "MODEL_TYPE_UNSUPPORTED");
+    printf("  Detected Block Count : %d (indices 0..%d)\n", cfg->block_count, cfg->block_count - 1);
+    printf("  SSM Layers Count     : %d\n", cfg->num_ssm_layers);
+    printf("  Attention Layers Count: %d\n", cfg->num_attn_layers);
+    printf("  SSM Tensors Exist    : %s\n", cfg->num_ssm_layers > 0 ? "YES" : "NO");
+    printf("  NextN Tensors Exist  : %s\n", cfg->has_nextn ? "YES" : "NO");
 
-    /* 3. Layer tensor resolution */
     printf("\n--- Per-Block Tensor Resolution ---\n");
     int missing_block_tensors = 0;
-    for (int b = 0; b <= max_block; b++) {
-        if (!block_present[b]) continue;
-
+    for (int b = 0; b < cfg->block_count; b++) {
         char nm[256];
-        snprintf(nm, sizeof(nm), "blk.%d.ssm_a", b);
-        int is_ssm_layer = (find_tensor(cat, nm) != NULL);
-
-        if (is_ssm_layer) {
+        if (cfg->layer_types[b] == LAYER_TYPE_SSM) {
             const char *expected_ssm[] = {
                 "blk.%d.attn_norm.weight",
                 "blk.%d.attn_qkv.weight",
@@ -492,13 +435,11 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat) {
                     missing_block_tensors++;
                 }
             }
-        } else {
+        } else if (cfg->layer_types[b] == LAYER_TYPE_ATTENTION) {
             const char *expected_attn[] = {
                 "blk.%d.attn_norm.weight",
                 "blk.%d.attn_q.weight",
-                "blk.%d.attn_q_norm.weight",
                 "blk.%d.attn_k.weight",
-                "blk.%d.attn_k_norm.weight",
                 "blk.%d.attn_v.weight",
                 "blk.%d.attn_output.weight",
                 "blk.%d.post_attention_norm.weight",
@@ -526,62 +467,11 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat) {
     }
 }
 
-static void run_bench_matvec(void) {
-    int in_features = 5120;
-    int out_features = 17408;
-    int blocks_per_row = in_features / 256;
-    size_t num_blocks = (size_t)out_features * blocks_per_row;
-
-    printf("=== Matvec Kernel Benchmark ===\n");
-    printf("Shape: in_features = %d, out_features = %d\n", in_features, out_features);
-    printf("FLOPs per call: %.2f MFLOPs\n\n", (2.0 * in_features * out_features) / 1e6);
-
-    block_q4_K *w = calloc(num_blocks, sizeof(block_q4_K));
-    float *x = malloc(in_features * sizeof(float));
-    float *out = malloc(out_features * sizeof(float));
-
-    if (!w || !x || !out) {
-        fprintf(stderr, "Failed to allocate memory for benchmark.\n");
-        return;
-    }
-
-    for (int i = 0; i < in_features; i++) x[i] = 0.01f * (i % 100);
-
-    int thread_counts[] = {1, 2, 4, 6};
-    int num_benchmarks = 4;
-    int warmup = 5;
-    int iterations = 20;
-
-    for (int b = 0; b < num_benchmarks; b++) {
-        int threads = thread_counts[b];
-        matvec_set_num_threads(threads);
-
-        for (int i = 0; i < warmup; i++) {
-            matvec(out, w, x, in_features, out_features, GGML_TYPE_Q4_K, NULL);
-        }
-
-        double t0 = get_time_ms();
-        for (int i = 0; i < iterations; i++) {
-            matvec(out, w, x, in_features, out_features, GGML_TYPE_Q4_K, NULL);
-        }
-        double t1 = get_time_ms();
-
-        double total_ms = t1 - t0;
-        double avg_ms = total_ms / iterations;
-        double gflops = (2.0 * in_features * out_features * 1e-9) / (avg_ms * 1e-3);
-
-        printf("  Threads: %2d | Time: %6.2f ms/call | Performance: %6.2f GFLOPS\n",
-               threads, avg_ms, gflops);
-    }
-
-    free(w);
-    free(x);
-    free(out);
-}
+/* ─── Main Execution ────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
-    /* ── CLI state ── */
     char    *model_path          = NULL;
+    char    *arch_str            = "auto";
     char    *prompt_text         = NULL;
     char    *system_text         = NULL;
     char    *prompt_ids_str      = NULL;
@@ -589,10 +479,10 @@ int main(int argc, char **argv) {
     char    *save_state_path     = NULL;
     char    *load_state_path     = NULL;
     char    *state_info_file     = NULL;
-    char    *prefill_mode_str    = "batch";
-    int      num_threads         = 4;
-    int      max_tokens          = 16;
-    int      context_size        = 256;
+    char    *prefill_mode_str    = "stream";
+    int      num_threads         = 0;
+    int      max_tokens          = 128;
+    int      context_size        = 4096;
     int      decode_output       = 0;
     int      print_top_k         = 0;
     int      logits_summary      = 0;
@@ -627,6 +517,7 @@ int main(int argc, char **argv) {
 #define NEXTINT(dst) do { if (i+1>=argc){fprintf(stderr,"Missing arg for %s\n",argv[i]);return 1;} dst = atoi(argv[++i]); } while(0)
 #define NEXTFLT(dst) do { if (i+1>=argc){fprintf(stderr,"Missing arg for %s\n",argv[i]);return 1;} dst = (float)atof(argv[++i]); } while(0)
         if      (!strcmp(argv[i],"--model"))            { NEXTARG(model_path); }
+        else if (!strcmp(argv[i],"--arch"))             { NEXTARG(arch_str); }
         else if (!strcmp(argv[i],"--prompt"))           { NEXTARG(prompt_text); }
         else if (!strcmp(argv[i],"--system"))           { NEXTARG(system_text); }
         else if (!strcmp(argv[i],"--prompt-ids"))        { NEXTARG(prompt_ids_str); }
@@ -661,10 +552,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--debug-hidden-norm")) { debug_hidden_norm = 1; }
         else if (!strcmp(argv[i],"--log-io"))            { log_io = 1; }
         else if (!strcmp(argv[i],"--log-rss"))           { log_rss = 1; }
-        else if (!strcmp(argv[i],"--bench-matvec"))     {
-            run_bench_matvec();
-            return 0;
-        }
         else if (!strcmp(argv[i],"--profile-decode"))    { profile_decode = 1; }
         else if (!strcmp(argv[i],"--warm-cache"))        { warm_cache = 1; }
         else if (!strcmp(argv[i],"--io-mode"))          { NEXTARG(io_mode_str); }
@@ -694,24 +581,41 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* ── Load catalog and dynamic config ── */
+    tensor_catalog *catalog = load_tensor_catalog(model_path);
+    if (!catalog) {
+        fprintf(stderr, "Error: Failed to load tensor catalog for %s\n", model_path);
+        return 1;
+    }
+
+    qwen_model_config *cfg = load_qwen_model_config(model_path, catalog, arch_str);
+    if (!cfg) {
+        fprintf(stderr, "Error: Failed to resolve model configuration for %s\n", model_path);
+        free_tensor_catalog(catalog);
+        return 1;
+    }
+
     if (print_missing_tensors_flag) {
-        tensor_catalog *catalog = load_tensor_catalog(model_path);
-        if (!catalog) {
-            fprintf(stderr, "Error: Failed to load tensor catalog for %s\n", model_path);
-            return 1;
-        }
-        run_missing_tensor_diagnostics(catalog);
+        run_missing_tensor_diagnostics(catalog, cfg);
+        free_qwen_model_config(cfg);
         free_tensor_catalog(catalog);
         return 0;
+    }
+
+    if (cfg->model_type == MODEL_TYPE_UNSUPPORTED) {
+        fprintf(stderr, "[ERROR] Model type unsupported: neither SSM nor Attention layers were recognized.\n");
+        free_qwen_model_config(cfg);
+        free_tensor_catalog(catalog);
+        return 1;
     }
 
     /* ── Vocabulary-only commands ── */
     if (lookup_id_val >= 0) {
         char tok[1024];
         int r = lookup_token_by_id(model_path, lookup_id_val, tok, sizeof(tok));
-        if (r == 0)  { printf("Token ID %d: \"%s\"\n", lookup_id_val, tok); return 0; }
-        if (r == -2) { fprintf(stderr,"Token ID %d out of range.\n", lookup_id_val); return 1; }
-        fprintf(stderr,"Lookup failed.\n"); return 1;
+        if (r == 0)  { printf("Token ID %d: \"%s\"\n", lookup_id_val, tok); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 0; }
+        if (r == -2) { fprintf(stderr,"Token ID %d out of range.\n", lookup_id_val); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
+        fprintf(stderr,"Lookup failed.\n"); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1;
     }
     if (lookup_ids_arg) {
         char *dup = strdup(lookup_ids_arg);
@@ -726,11 +630,15 @@ int main(int argc, char **argv) {
             tok = strtok(NULL, ",");
         }
         free(dup);
+        free_qwen_model_config(cfg);
+        free_tensor_catalog(catalog);
         return 0;
     }
     if (search_token_q) {
         printf("Searching vocabulary for \"%s\"...\n", search_token_q);
         search_token(model_path, search_token_q);
+        free_qwen_model_config(cfg);
+        free_tensor_catalog(catalog);
         return 0;
     }
 
@@ -759,6 +667,7 @@ int main(int argc, char **argv) {
         if (!quiet) fprintf(stderr, "[INFO] Loading GGUF tokenizer to encode --prompt...\n");
         if (!g_tok) {
             fprintf(stderr, "Error: Failed to initialize tokenizer from %s\n", model_path);
+            free_qwen_model_config(cfg); free_tensor_catalog(catalog);
             return 1;
         }
         int max_prompt_toks = (int)strlen(prompt_text) * 2 + 128;
@@ -766,7 +675,7 @@ int main(int argc, char **argv) {
         prompt_len = tokenizer_encode(g_tok, prompt_text, prompt_tokens, max_prompt_toks);
         if (prompt_len <= 0) {
             fprintf(stderr, "Error: Tokenizer produced 0 tokens for prompt text.\n");
-            free(prompt_tokens);
+            free(prompt_tokens); free_qwen_model_config(cfg); free_tensor_catalog(catalog);
             return 1;
         }
         if (!quiet) {
@@ -779,9 +688,9 @@ int main(int argc, char **argv) {
         char *tok = strtok(dup, ",");
         while (tok) {
             int id = atoi(tok);
-            if (id < 0 || id >= MODEL_VOCAB) {
+            if (id < 0 || id >= cfg->vocab_size) {
                 fprintf(stderr,"Invalid token ID %d\n", id);
-                free(dup); free(prompt_tokens); return 1;
+                free(dup); free(prompt_tokens); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1;
             }
             prompt_tokens = realloc(prompt_tokens, (prompt_len+1)*sizeof(int));
             prompt_tokens[prompt_len++] = id;
@@ -790,19 +699,19 @@ int main(int argc, char **argv) {
         free(dup);
     } else if (prompt_ids_file) {
         FILE *f = fopen(prompt_ids_file, "r");
-        if (!f) { fprintf(stderr,"Cannot open %s\n", prompt_ids_file); return 1; }
+        if (!f) { fprintf(stderr,"Cannot open %s\n", prompt_ids_file); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
         fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
         char *content = malloc(fsz + 1);
         if (fread(content, 1, fsz, f) != (size_t)fsz) {
-            fprintf(stderr,"Read error on %s\n", prompt_ids_file); fclose(f); return 1;
+            fprintf(stderr,"Read error on %s\n", prompt_ids_file); fclose(f); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1;
         }
         content[fsz] = '\0'; fclose(f);
         char *tok = strtok(content, ",\r\n\t ");
         while (tok) {
             if (strlen(tok)) {
                 int id = atoi(tok);
-                if (id < 0 || id >= MODEL_VOCAB) {
-                    fprintf(stderr,"Invalid token ID %d\n", id); free(content); return 1;
+                if (id < 0 || id >= cfg->vocab_size) {
+                    fprintf(stderr,"Invalid token ID %d\n", id); free(content); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1;
                 }
                 prompt_tokens = realloc(prompt_tokens, (prompt_len+1)*sizeof(int));
                 prompt_tokens[prompt_len++] = id;
@@ -816,28 +725,23 @@ int main(int argc, char **argv) {
 
     if (!load_state_path) {
         if (prompt_len <= 0) {
-            fprintf(stderr,"Error: empty prompt. Use --prompt, --prompt-ids, --prompt-ids-file, or --load-state.\n"); return 1;
+            fprintf(stderr,"Error: empty prompt. Use --prompt, --prompt-ids, --prompt-ids-file, or --load-state.\n");
+            free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1;
         }
         if (context_size < prompt_len + max_tokens)
             context_size = prompt_len + max_tokens;
     }
 
-    /* ── Read EOS/BOS from GGUF metadata ── */
-    uint32_t eos_id = 248046, bos_id = 248044;
-    get_metadata_uint32(model_path, "tokenizer.ggml.eos_token_id", &eos_id);
-    get_metadata_uint32(model_path, "tokenizer.ggml.bos_token_id", &bos_id);
-    if (!quiet) fprintf(stderr, "[INFO] EOS token ID: %u\n", eos_id);
+    uint32_t eos_id = cfg->eos_token_id;
+    uint32_t bos_id = cfg->bos_token_id;
+    if (!quiet) fprintf(stderr, "[INFO] Model EOS ID: %u, BOS ID: %u\n", eos_id, bos_id);
 
-    /* ── Load tensor catalog ── */
-    tensor_catalog *catalog = load_tensor_catalog(model_path);
-    if (!catalog) { fprintf(stderr,"Failed to load tensor catalog.\n"); return 1; }
-
-    scratch_buffers *scratch = allocate_scratch_buffers();
-    if (!scratch) { fprintf(stderr, "Allocation failure for scratch buffers.\n"); return 1; }
+    scratch_buffers *scratch = allocate_scratch_buffers(cfg);
+    if (!scratch) { fprintf(stderr, "Allocation failure for scratch buffers.\n"); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
 
     /* ── Streaming context ── */
     stream_context *sctx = init_stream_context(model_path, scratch->stream_buffer, scratch->stream_buffer_size);
-    if (!sctx) { fprintf(stderr,"Failed to init stream context.\n"); return 1; }
+    if (!sctx) { fprintf(stderr,"Failed to init stream context.\n"); free_scratch_buffers(scratch); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
     int fd = sctx->fd;
 
     /* ── Load output norm ── */
@@ -851,6 +755,11 @@ int main(int argc, char **argv) {
 
     const tensor_info *ti_emb  = find_tensor(catalog, "token_embd.weight");
     const tensor_info *ti_outw = find_tensor(catalog, "output.weight");
+
+    if (!ti_outw && ti_emb) {
+        ti_outw = ti_emb; // Tied embedding fallback!
+    }
+
     int missing_core = 0;
     if (!ti_emb)   { fprintf(stderr, "[ERROR] Missing core tensor: token_embd.weight\n"); missing_core++; }
     if (!ti_onorm) { fprintf(stderr, "[ERROR] Missing core tensor: output_norm.weight\n"); missing_core++; }
@@ -858,6 +767,9 @@ int main(int argc, char **argv) {
     if (missing_core > 0) {
         return 1;
     }
+
+    size_t embed_row_bytes = ti_emb->byte_size / (ti_emb->dims[1] > 0 ? ti_emb->dims[1] : cfg->vocab_size);
+    size_t logit_row_bytes = ti_outw->byte_size / (ti_outw->dims[1] > 0 ? ti_outw->dims[1] : cfg->vocab_size);
 
     int is_mmap_mode = (!strcmp(io_mode_str, "mmap"));
     const uint8_t *g_mmap_full = NULL;
@@ -958,17 +870,17 @@ int main(int argc, char **argv) {
         if (context_size < prompt_len + max_tokens + 64)
             context_size = prompt_len + max_tokens + 64;
 
-        state = allocate_model_state(context_size);
+        state = allocate_model_state(cfg, context_size);
         buf_a = malloc(300ULL * 1024 * 1024);
         buf_b = malloc(300ULL * 1024 * 1024);
         bufs[0] = buf_a; bufs[1] = buf_b;
-        hidden_single = malloc(MODEL_HIDDEN * sizeof(float));
-        logits = malloc(MODEL_VOCAB * sizeof(float));
+        hidden_single = malloc(cfg->hidden_dim * sizeof(float));
+        logits = malloc(cfg->vocab_size * sizeof(float));
 
         if (fread(state->kv_cache, 1, hdr.kv_cache_bytes, sf) != hdr.kv_cache_bytes ||
             fread(state->ssm_states, 1, hdr.ssm_state_bytes, sf) != hdr.ssm_state_bytes ||
             fread(state->ssm_conv_histories, 1, hdr.ssm_conv_bytes, sf) != hdr.ssm_conv_bytes ||
-            fread(hidden_single, sizeof(float), MODEL_HIDDEN, sf) != (size_t)MODEL_HIDDEN) {
+            fread(hidden_single, sizeof(float), cfg->hidden_dim, sf) != (size_t)cfg->hidden_dim) {
             fprintf(stderr, "Error: Failed to read state buffers from %s\n", load_state_path);
             fclose(sf);
             return 1;
@@ -977,16 +889,16 @@ int main(int argc, char **argv) {
         fclose(sf);
         is_loaded = 1;
         t_prefill_end = get_time_ms();
-        double loaded_mb = (double)(sizeof(hdr) + hdr.kv_cache_bytes + hdr.ssm_state_bytes + hdr.ssm_conv_bytes + MODEL_HIDDEN * sizeof(float)) / (1024 * 1024);
+        double loaded_mb = (double)(sizeof(hdr) + hdr.kv_cache_bytes + hdr.ssm_state_bytes + hdr.ssm_conv_bytes + cfg->hidden_dim * sizeof(float)) / (1024 * 1024);
         printf("[INFO] Loaded state from %s (%.2f MB, pos=%d, next_tok=%d) in %.2f ms\n",
                load_state_path, loaded_mb, prompt_len, next_tok, t_prefill_end - t_prefill_start);
     } else {
-        state    = allocate_model_state(context_size);
+        state    = allocate_model_state(cfg, context_size);
         buf_a    = malloc(300ULL * 1024 * 1024);
         buf_b    = malloc(300ULL * 1024 * 1024);
-        hidden_states = malloc((size_t)prompt_len * MODEL_HIDDEN * sizeof(float));
-        hidden_single = malloc(MODEL_HIDDEN * sizeof(float));
-        logits        = malloc(MODEL_VOCAB  * sizeof(float));
+        hidden_states = malloc((size_t)prompt_len * cfg->hidden_dim * sizeof(float));
+        hidden_single = malloc(cfg->hidden_dim * sizeof(float));
+        logits        = malloc(cfg->vocab_size  * sizeof(float));
         if (!state || !buf_a || !buf_b || !hidden_states || !hidden_single || !logits) {
             fprintf(stderr,"Allocation failure.\n"); return 1;
         }
@@ -998,97 +910,98 @@ int main(int argc, char **argv) {
 
         /* Embedding lookups */
         for (int pos = 0; pos < prompt_len; pos++) {
-            uint8_t row_buf[MODEL_EMBED_ROW_Q4K];
-            if (exact_pread(fd, row_buf, MODEL_EMBED_ROW_Q4K,
-                            ti_emb->absolute_offset + (uint64_t)prompt_tokens[pos] * MODEL_EMBED_ROW_Q4K)
-                < MODEL_EMBED_ROW_Q4K) return 1;
-            bytes_read += MODEL_EMBED_ROW_Q4K;
-            dequantize_q4_K(row_buf, hidden_states + pos * MODEL_HIDDEN, MODEL_HIDDEN);
+            uint8_t *row_buf = malloc(embed_row_bytes);
+            if (exact_pread(fd, row_buf, embed_row_bytes,
+                            ti_emb->absolute_offset + (uint64_t)prompt_tokens[pos] * embed_row_bytes)
+                < (ssize_t)embed_row_bytes) { free(row_buf); return 1; }
+            bytes_read += embed_row_bytes;
+            dequantize_row(row_buf, hidden_states + pos * cfg->hidden_dim, cfg->hidden_dim, ti_emb->type);
+            free(row_buf);
         }
 
         /* Layer loop with double-buffered prefetch */
         bufs[0] = buf_a; bufs[1] = buf_b;
         abuf = 0; lb = 0; pth_active = 0;
-        if (load_layer_block_weights(fd, catalog, 0, bufs[0], &blks[0], &lb) != 0) return 1;
+        if (load_layer_block_weights(fd, catalog, cfg, 0, bufs[0], &blks[0], &lb) != 0) return 1;
         bytes_read += lb;
 
-        for (int li = 0; li < MODEL_LAYERS; li++) {
-            if (li + 1 < MODEL_LAYERS) {
-                pargs = (prefetch_args){.fd=fd, .cat=catalog, .layer_idx=li+1,
+        for (int li = 0; li < cfg->block_count; li++) {
+            if (li + 1 < cfg->block_count) {
+                pargs = (prefetch_args){.fd=fd, .cat=catalog, .cfg=cfg, .layer_idx=li+1,
                                         .buf=bufs[1-abuf], .blk=&blks[1-abuf],
                                         .bytes_read=0, .status=-1};
                 pth_active = (pthread_create(&pth, NULL, prefetch_thread_fn, &pargs) == 0);
                 if (!pth_active) {
                     pargs.bytes_read = 0;
-                    load_layer_block_weights(fd, catalog, li+1, bufs[1-abuf], &blks[1-abuf], &pargs.bytes_read);
+                    load_layer_block_weights(fd, catalog, cfg, li+1, bufs[1-abuf], &blks[1-abuf], &pargs.bytes_read);
                 }
             } else { pth_active = 0; }
 
             layer_block_weights *blk = &blks[abuf];
             for (int pos = 0; pos < prompt_len; pos++) {
-                float *h = hidden_states + pos * MODEL_HIDDEN;
+                float *h = hidden_states + pos * cfg->hidden_dim;
                 if (blk->l_type == LAYER_TYPE_ATTENTION)
-                    attention_forward(h, pos, li, &blk->u.attn, state, scratch, 10000000.0, 64);
+                    attention_forward(h, pos, li, &blk->u.attn, state, scratch, cfg);
                 else
-                    ssm_layer_forward(h, pos, li, &blk->u.ssm, state, scratch);
+                    ssm_layer_forward(h, pos, li, &blk->u.ssm, state, scratch, cfg);
 
-                rmsnorm(scratch->hidden_state, h, blk->post_attn_norm_w, MODEL_HIDDEN, 1e-6f);
+                rmsnorm(scratch->hidden_state, h, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
                 matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                       MODEL_HIDDEN, MODEL_FFN, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                       cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                 matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                       MODEL_HIDDEN, MODEL_FFN, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, MODEL_FFN);
+                       cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                 matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
-                       MODEL_FFN, MODEL_HIDDEN, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
-                add_residual(h, h, scratch->hidden_state, MODEL_HIDDEN);
+                       cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
+                add_residual(h, h, scratch->hidden_state, cfg->hidden_dim);
             }
             if (dump_layer == li || dump_layer == -2) {
-                float *h_last = hidden_states + (prompt_len - 1) * MODEL_HIDDEN;
-                float norm = l2_norm(h_last, MODEL_HIDDEN);
+                float *h_last = hidden_states + (prompt_len - 1) * cfg->hidden_dim;
+                float norm = l2_norm(h_last, cfg->hidden_dim);
                 printf("[DUMP-LAYER %d] pos=%d L2 norm: %.6f, first 10: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]\n",
                        li, prompt_len - 1, norm,
                        h_last[0], h_last[1], h_last[2], h_last[3], h_last[4],
                        h_last[5], h_last[6], h_last[7], h_last[8], h_last[9]);
             }
-            maybe_print_norm(hidden_states + (prompt_len-1)*MODEL_HIDDEN, MODEL_HIDDEN, li, debug_hidden_norm);
+            maybe_print_norm(hidden_states + (prompt_len-1)*cfg->hidden_dim, cfg->hidden_dim, li, debug_hidden_norm);
 
             if (pth_active) {
                 pthread_join(pth, NULL);
                 bytes_read += pargs.bytes_read;
-            } else if (li + 1 < MODEL_LAYERS) {
+            } else if (li + 1 < cfg->block_count) {
                 bytes_read += pargs.bytes_read;
             }
             abuf = 1 - abuf;
         }
 
         /* Final norm on last position */
-        float *last_h = hidden_states + (prompt_len - 1) * MODEL_HIDDEN;
-        rmsnorm(last_h, last_h, output_norm, MODEL_HIDDEN, 1e-6f);
-        memcpy(hidden_single, last_h, MODEL_HIDDEN * sizeof(float));
+        float *last_h = hidden_states + (prompt_len - 1) * cfg->hidden_dim;
+        rmsnorm(last_h, last_h, output_norm, cfg->hidden_dim, 1e-6f);
+        memcpy(hidden_single, last_h, cfg->hidden_dim * sizeof(float));
 
         /* Compute initial logits */
         if (mmap_output_weight) {
-            matvec(logits, mmap_output_weight, last_h, MODEL_HIDDEN, MODEL_VOCAB, GGML_TYPE_Q6_K, NULL);
+            matvec(logits, mmap_output_weight, last_h, cfg->hidden_dim, cfg->vocab_size, ti_outw->type, NULL);
         } else {
             int64_t rows_done = 0;
             int64_t chunk_rows = 15000;
             uint8_t *cbuf = scratch->stream_buffer;
-            while (rows_done < MODEL_VOCAB) {
-                int64_t r = MODEL_VOCAB - rows_done;
+            while (rows_done < cfg->vocab_size) {
+                int64_t r = cfg->vocab_size - rows_done;
                 if (r > chunk_rows) r = chunk_rows;
-                if (exact_pread(fd, cbuf, r * MODEL_LOGIT_ROW_Q6K,
-                                ti_outw->absolute_offset + rows_done * MODEL_LOGIT_ROW_Q6K)
-                    < r * MODEL_LOGIT_ROW_Q6K) return 1;
-                bytes_read += r * MODEL_LOGIT_ROW_Q6K;
-                matvec(logits + rows_done, cbuf, last_h, MODEL_HIDDEN, r, GGML_TYPE_Q6_K, NULL);
+                if (exact_pread(fd, cbuf, r * logit_row_bytes,
+                                ti_outw->absolute_offset + rows_done * logit_row_bytes)
+                    < (ssize_t)(r * logit_row_bytes)) return 1;
+                bytes_read += r * logit_row_bytes;
+                matvec(logits + rows_done, cbuf, last_h, cfg->hidden_dim, r, ti_outw->type, NULL);
                 rows_done += r;
             }
         }
 
         if (repeat_penalty > 1.0f && prompt_tokens && prompt_len > 0) {
-            sampler_apply_repetition_penalty(logits, MODEL_VOCAB, prompt_tokens, prompt_len, repeat_penalty);
+            sampler_apply_repetition_penalty(logits, cfg->vocab_size, prompt_tokens, prompt_len, repeat_penalty);
         }
-        next_tok = sampler_sample(smp, logits, MODEL_VOCAB);
+        next_tok = sampler_sample(smp, logits, cfg->vocab_size);
         t_prefill_end = get_time_ms();
     }
 
@@ -1145,14 +1058,15 @@ int main(int argc, char **argv) {
         /* Embedding for next_tok */
         {
             double t0 = get_time_ms();
-            uint8_t row_buf[MODEL_EMBED_ROW_Q4K];
-            if (exact_pread(fd, row_buf, MODEL_EMBED_ROW_Q4K,
-                            ti_emb->absolute_offset + (uint64_t)next_tok * MODEL_EMBED_ROW_Q4K)
-                < MODEL_EMBED_ROW_Q4K) return 1;
+            uint8_t *row_buf = malloc(embed_row_bytes);
+            if (exact_pread(fd, row_buf, embed_row_bytes,
+                            ti_emb->absolute_offset + (uint64_t)next_tok * embed_row_bytes)
+                < (ssize_t)embed_row_bytes) { free(row_buf); return 1; }
             double t1 = get_time_ms();
             tok_io_ms += (t1 - t0);
-            bytes_read += MODEL_EMBED_ROW_Q4K;
-            dequantize_q4_K(row_buf, hidden_single, MODEL_HIDDEN);
+            bytes_read += embed_row_bytes;
+            dequantize_row(row_buf, hidden_single, cfg->hidden_dim, ti_emb->type);
+            free(row_buf);
         }
 
         uint64_t phys_io_start = get_proc_self_io_read_bytes();
@@ -1160,33 +1074,33 @@ int main(int argc, char **argv) {
 
         /* Layer loop */
         if (is_mmap_mode && g_mmap_full) {
-            for (int li = 0; li < MODEL_LAYERS; li++) {
+            for (int li = 0; li < cfg->block_count; li++) {
                 layer_block_weights *blk = &blks[0];
-                load_layer_block_weights_mmap(catalog, li, g_mmap_full, blk);
+                load_layer_block_weights_mmap(catalog, cfg, li, g_mmap_full, blk);
 
                 if (blk->l_type == LAYER_TYPE_ATTENTION) {
                     double t0 = get_time_ms();
-                    attention_forward(hidden_single, cur_pos, li, &blk->u.attn, state, scratch, 10000000.0, 64);
+                    attention_forward(hidden_single, cur_pos, li, &blk->u.attn, state, scratch, cfg);
                     double t1 = get_time_ms();
                     tok_attn_ms += (t1 - t0);
                 } else {
                     double t0 = get_time_ms();
-                    ssm_layer_forward(hidden_single, cur_pos, li, &blk->u.ssm, state, scratch);
+                    ssm_layer_forward(hidden_single, cur_pos, li, &blk->u.ssm, state, scratch, cfg);
                     double t1 = get_time_ms();
                     tok_ssm_ms += (t1 - t0);
                 }
 
                 {
                     double t0 = get_time_ms();
-                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, MODEL_HIDDEN, 1e-6f);
+                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
                     matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                           MODEL_HIDDEN, MODEL_FFN, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                     matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                           MODEL_HIDDEN, MODEL_FFN, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, MODEL_FFN);
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                     matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
-                           MODEL_FFN, MODEL_HIDDEN, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
-                    add_residual(hidden_single, hidden_single, scratch->hidden_state, MODEL_HIDDEN);
+                           cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
+                    add_residual(hidden_single, hidden_single, scratch->hidden_state, cfg->hidden_dim);
                     double t1 = get_time_ms();
                     tok_ffn_ms += (t1 - t0);
                 }
@@ -1195,22 +1109,22 @@ int main(int argc, char **argv) {
             abuf = 0; lb = 0;
             {
                 double t0 = get_time_ms();
-                if (load_layer_block_weights(fd, catalog, 0, bufs[0], &blks[0], &lb) != 0) return 1;
+                if (load_layer_block_weights(fd, catalog, cfg, 0, bufs[0], &blks[0], &lb) != 0) return 1;
                 double t1 = get_time_ms();
                 tok_io_ms += (t1 - t0);
                 bytes_read += lb;
             }
 
-            for (int li = 0; li < MODEL_LAYERS; li++) {
-                if (li + 1 < MODEL_LAYERS) {
-                    pargs = (prefetch_args){.fd=fd, .cat=catalog, .layer_idx=li+1,
+            for (int li = 0; li < cfg->block_count; li++) {
+                if (li + 1 < cfg->block_count) {
+                    pargs = (prefetch_args){.fd=fd, .cat=catalog, .cfg=cfg, .layer_idx=li+1,
                                             .buf=bufs[1-abuf], .blk=&blks[1-abuf],
                                             .bytes_read=0, .status=-1};
                     pth_active = (pthread_create(&pth, NULL, prefetch_thread_fn, &pargs) == 0);
                     if (!pth_active) {
                         double t0 = get_time_ms();
                         pargs.bytes_read = 0;
-                        load_layer_block_weights(fd, catalog, li+1, bufs[1-abuf], &blks[1-abuf], &pargs.bytes_read);
+                        load_layer_block_weights(fd, catalog, cfg, li+1, bufs[1-abuf], &blks[1-abuf], &pargs.bytes_read);
                         double t1 = get_time_ms();
                         tok_io_ms += (t1 - t0);
                     }
@@ -1219,27 +1133,27 @@ int main(int argc, char **argv) {
                 layer_block_weights *blk = &blks[abuf];
                 if (blk->l_type == LAYER_TYPE_ATTENTION) {
                     double t0 = get_time_ms();
-                    attention_forward(hidden_single, cur_pos, li, &blk->u.attn, state, scratch, 10000000.0, 64);
+                    attention_forward(hidden_single, cur_pos, li, &blk->u.attn, state, scratch, cfg);
                     double t1 = get_time_ms();
                     tok_attn_ms += (t1 - t0);
                 } else {
                     double t0 = get_time_ms();
-                    ssm_layer_forward(hidden_single, cur_pos, li, &blk->u.ssm, state, scratch);
+                    ssm_layer_forward(hidden_single, cur_pos, li, &blk->u.ssm, state, scratch, cfg);
                     double t1 = get_time_ms();
                     tok_ssm_ms += (t1 - t0);
                 }
 
                 {
                     double t0 = get_time_ms();
-                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, MODEL_HIDDEN, 1e-6f);
+                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
                     matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                           MODEL_HIDDEN, MODEL_FFN, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                     matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                           MODEL_HIDDEN, MODEL_FFN, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, MODEL_FFN);
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                     matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
-                           MODEL_FFN, MODEL_HIDDEN, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
-                    add_residual(hidden_single, hidden_single, scratch->hidden_state, MODEL_HIDDEN);
+                           cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
+                    add_residual(hidden_single, hidden_single, scratch->hidden_state, cfg->hidden_dim);
                     double t1 = get_time_ms();
                     tok_ffn_ms += (t1 - t0);
                 }
@@ -1250,37 +1164,37 @@ int main(int argc, char **argv) {
                     double t1 = get_time_ms();
                     tok_io_ms += (t1 - t0);
                     bytes_read += pargs.bytes_read;
-                } else if (li + 1 < MODEL_LAYERS) {
+                } else if (li + 1 < cfg->block_count) {
                     bytes_read += pargs.bytes_read;
                 }
                 abuf = 1 - abuf;
             }
         }
 
-        rmsnorm(hidden_single, hidden_single, output_norm, MODEL_HIDDEN, 1e-6f);
+        rmsnorm(hidden_single, hidden_single, output_norm, cfg->hidden_dim, 1e-6f);
 
         /* Logits */
         if (mmap_output_weight) {
             double t0 = get_time_ms();
-            matvec(logits, mmap_output_weight, hidden_single, MODEL_HIDDEN, MODEL_VOCAB, GGML_TYPE_Q6_K, NULL);
+            matvec(logits, mmap_output_weight, hidden_single, cfg->hidden_dim, cfg->vocab_size, ti_outw->type, NULL);
             double t1 = get_time_ms();
             tok_out_cp_ms += (t1 - t0);
         } else {
             int64_t rows_done = 0, chunk_rows = 15000;
             uint8_t *cbuf = scratch->stream_buffer;
-            while (rows_done < MODEL_VOCAB) {
-                int64_t r = MODEL_VOCAB - rows_done;
+            while (rows_done < cfg->vocab_size) {
+                int64_t r = cfg->vocab_size - rows_done;
                 if (r > chunk_rows) r = chunk_rows;
                 double t0 = get_time_ms();
-                if (exact_pread(fd, cbuf, r * MODEL_LOGIT_ROW_Q6K,
-                                ti_outw->absolute_offset + rows_done * MODEL_LOGIT_ROW_Q6K)
-                    < r * MODEL_LOGIT_ROW_Q6K) return 1;
+                if (exact_pread(fd, cbuf, r * logit_row_bytes,
+                                ti_outw->absolute_offset + rows_done * logit_row_bytes)
+                    < (ssize_t)(r * logit_row_bytes)) return 1;
                 double t1 = get_time_ms();
                 tok_out_io_ms += (t1 - t0);
-                bytes_read += r * MODEL_LOGIT_ROW_Q6K;
+                bytes_read += r * logit_row_bytes;
 
                 double t2 = get_time_ms();
-                matvec(logits + rows_done, cbuf, hidden_single, MODEL_HIDDEN, r, GGML_TYPE_Q6_K, NULL);
+                matvec(logits + rows_done, cbuf, hidden_single, cfg->hidden_dim, r, ti_outw->type, NULL);
                 double t3 = get_time_ms();
                 tok_out_cp_ms += (t3 - t2);
 
@@ -1296,11 +1210,11 @@ int main(int argc, char **argv) {
                 if (seen) {
                     memcpy(seen, prompt_tokens, prompt_len * sizeof(int));
                     memcpy(seen + prompt_len, gen_tokens, gen_count * sizeof(int));
-                    sampler_apply_repetition_penalty(logits, MODEL_VOCAB, seen, num_seen, repeat_penalty);
+                    sampler_apply_repetition_penalty(logits, cfg->vocab_size, seen, num_seen, repeat_penalty);
                     free(seen);
                 }
             }
-            next_tok = sampler_sample(smp, logits, MODEL_VOCAB);
+            next_tok = sampler_sample(smp, logits, cfg->vocab_size);
             double t1 = get_time_ms();
             tok_smp_ms += (t1 - t0);
         }
@@ -1396,7 +1310,7 @@ int main(int argc, char **argv) {
                 .pos = prompt_len + gen_count,
                 .prompt_len = prompt_len + gen_count,
                 .context_size = context_size,
-                .hidden_dim = MODEL_HIDDEN,
+                .hidden_dim = cfg->hidden_dim,
                 .kv_cache_bytes = state->kv_cache_size,
                 .ssm_state_bytes = state->ssm_states_size,
                 .ssm_conv_bytes = state->ssm_conv_histories_size,
@@ -1407,11 +1321,11 @@ int main(int argc, char **argv) {
             fwrite(state->kv_cache, 1, state->kv_cache_size, sf);
             fwrite(state->ssm_states, 1, state->ssm_states_size, sf);
             fwrite(state->ssm_conv_histories, 1, state->ssm_conv_histories_size, sf);
-            fwrite(hidden_single, sizeof(float), MODEL_HIDDEN, sf);
+            fwrite(hidden_single, sizeof(float), cfg->hidden_dim, sf);
             fflush(sf);
             fclose(sf);
             if (rename(tmp_path, save_state_path) == 0) {
-                double total_mb = (double)(sizeof(hdr) + state->kv_cache_size + state->ssm_states_size + state->ssm_conv_histories_size + MODEL_HIDDEN * sizeof(float)) / (1024 * 1024);
+                double total_mb = (double)(sizeof(hdr) + state->kv_cache_size + state->ssm_states_size + state->ssm_conv_histories_size + cfg->hidden_dim * sizeof(float)) / (1024 * 1024);
                 if (!quiet) fprintf(stderr, "[INFO] Saved multi-turn state (%.2f MB) to %s (pos=%d)\n", total_mb, save_state_path, hdr.pos);
             } else {
                 fprintf(stderr, "Error: Failed to rename temporary state file %s to %s\n", tmp_path, save_state_path);
@@ -1467,6 +1381,7 @@ int main(int argc, char **argv) {
     close_stream_context(sctx);
     free_model_state(state);
     free_scratch_buffers(scratch);
+    free_qwen_model_config(cfg);
     free_tensor_catalog(catalog);
     free(prompt_tokens);
     return 0;

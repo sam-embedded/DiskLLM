@@ -5,41 +5,63 @@
 #include <stdlib.h>
 #include <string.h>
 
-scratch_buffers *allocate_scratch_buffers(void) {
+scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
+    if (!cfg) {
+        qwen_model_config dummy = {
+            .hidden_dim = 5120, .ffn_dim = 17408,
+            .num_attn_heads = 24, .key_length = 256,
+            .num_kv_heads = 4, .ssm_inner_size = 6144,
+            .ssm_group_count = 16, .ssm_state_size = 128,
+            .vocab_size = 248320
+        };
+        return allocate_scratch_buffers(&dummy);
+    }
+
     scratch_buffers *scratch = calloc(1, sizeof(scratch_buffers));
     if (!scratch) {
         fprintf(stderr, "Error: Failed to allocate scratch_buffers wrapper.\n");
         return NULL;
     }
 
-    // Allocate 128 MiB for streaming
-    scratch->stream_buffer_size = 128ULL * 1024ULL * 1024ULL;
+    scratch->stream_buffer_size = 300ULL * 1024ULL * 1024ULL;
     int ret = posix_memalign((void **)&scratch->stream_buffer, 64, scratch->stream_buffer_size);
     if (ret != 0 || !scratch->stream_buffer) {
-        fprintf(stderr, "Error: Failed to allocate stream buffer of size 128 MiB.\n");
+        fprintf(stderr, "Error: Failed to allocate stream buffer.\n");
         free(scratch);
         return NULL;
     }
     memset(scratch->stream_buffer, 0, scratch->stream_buffer_size);
 
-    // Helper macro to allocate and check aligned buffers
-    #define ALLOC_ALIGNED_FLOAT(ptr, count) \
-        ret = posix_memalign((void **)&scratch->ptr, 64, (count) * sizeof(float)); \
+    int hidden_dim = cfg->hidden_dim > 0 ? cfg->hidden_dim : 5120;
+    int ffn_dim = cfg->ffn_dim > 0 ? cfg->ffn_dim : 17408;
+    int vocab_size = cfg->vocab_size > 0 ? cfg->vocab_size : 248320;
+
+    int q_total_dim = cfg->num_attn_heads * cfg->key_length * 2;
+    if (q_total_dim < 12288) q_total_dim = 12288;
+
+    int kv_total_dim = cfg->num_kv_heads * cfg->key_length;
+    if (kv_total_dim < 1024) kv_total_dim = 1024;
+
+    int ssm_conv_dim = cfg->ssm_inner_size + 2 * (cfg->ssm_group_count * cfg->ssm_state_size);
+    if (ssm_conv_dim < 10240) ssm_conv_dim = 10240;
+
+    #define ALLOC_ALIGNED_FLOAT(ptr, count) do { \
+        ret = posix_memalign((void **)&scratch->ptr, 64, (size_t)(count) * sizeof(float)); \
         if (ret != 0 || !scratch->ptr) { \
-            fprintf(stderr, "Error: Failed to allocate activation " #ptr " of size " #count " floats.\n"); \
+            fprintf(stderr, "Error: Failed to allocate activation " #ptr " of size %d floats.\n", (int)(count)); \
             free_scratch_buffers(scratch); \
             return NULL; \
         } \
-        memset(scratch->ptr, 0, (count) * sizeof(float));
+        memset(scratch->ptr, 0, (size_t)(count) * sizeof(float)); \
+    } while(0)
 
-    // Allocate all activation buffers
-    ALLOC_ALIGNED_FLOAT(hidden_state, 5120);
-    ALLOC_ALIGNED_FLOAT(ffn_gate, 17408);
-    ALLOC_ALIGNED_FLOAT(ffn_up, 17408);
-    ALLOC_ALIGNED_FLOAT(attn_q, 12288);
-    ALLOC_ALIGNED_FLOAT(attn_kv, 1024);
-    ALLOC_ALIGNED_FLOAT(ssm_qkv, 10240);
-    ALLOC_ALIGNED_FLOAT(logits, 248320);
+    ALLOC_ALIGNED_FLOAT(hidden_state, hidden_dim);
+    ALLOC_ALIGNED_FLOAT(ffn_gate, ffn_dim);
+    ALLOC_ALIGNED_FLOAT(ffn_up, ffn_dim);
+    ALLOC_ALIGNED_FLOAT(attn_q, q_total_dim);
+    ALLOC_ALIGNED_FLOAT(attn_kv, kv_total_dim);
+    ALLOC_ALIGNED_FLOAT(ssm_qkv, ssm_conv_dim);
+    ALLOC_ALIGNED_FLOAT(logits, vocab_size);
 
     #undef ALLOC_ALIGNED_FLOAT
 

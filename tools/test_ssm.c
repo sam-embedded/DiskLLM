@@ -24,10 +24,31 @@ void test_ssm_layer_f32(void) {
     int state_head_dim = 128;
     int out_size = 6144;
 
+    qwen_model_config cfg = {
+        .block_count = 64,
+        .hidden_dim = 5120,
+        .ffn_dim = 17408,
+        .num_attn_heads = 24,
+        .num_kv_heads = 4,
+        .key_length = 256,
+        .value_length = 256,
+        .rope_freq_base = 10000000.0f,
+        .rope_dim = 64,
+        .ssm_conv_kernel = 4,
+        .ssm_state_size = 128,
+        .ssm_group_count = 16,
+        .ssm_time_step_rank = 48,
+        .ssm_inner_size = 6144,
+        .vocab_size = 248320
+    };
+    for (int b = 0; b < 64; b++) {
+        cfg.layer_types[b] = (b - 3) % 4 == 0 ? LAYER_TYPE_ATTENTION : LAYER_TYPE_SSM;
+    }
+
     // Allocate state and scratch
-    model_state *state = allocate_model_state(context_length);
+    model_state *state = allocate_model_state(&cfg, context_length);
     assert(state != NULL);
-    scratch_buffers *scratch = allocate_scratch_buffers();
+    scratch_buffers *scratch = allocate_scratch_buffers(&cfg);
     assert(scratch != NULL);
 
     // Allocate weights
@@ -102,7 +123,7 @@ void test_ssm_layer_f32(void) {
     int layer_idx = 0; // Layer 0 is an SSM layer
 
     printf("  Running forward pass at pos = 0...\n");
-    ssm_layer_forward(hidden_state, 0, layer_idx, &weights, state, scratch);
+    ssm_layer_forward(hidden_state, 0, layer_idx, &weights, state, scratch, &cfg);
     for (int i = 0; i < hidden_size; i++) {
         assert(!is_invalid(hidden_state[i]));
     }
@@ -116,7 +137,7 @@ void test_ssm_layer_f32(void) {
     printf("    pos = 0 completed successfully. Conv history is updated.\n");
 
     printf("  Running forward pass at pos = 1...\n");
-    ssm_layer_forward(hidden_state, 1, layer_idx, &weights, state, scratch);
+    ssm_layer_forward(hidden_state, 1, layer_idx, &weights, state, scratch, &cfg);
     for (int i = 0; i < hidden_size; i++) {
         assert(!is_invalid(hidden_state[i]));
     }
@@ -129,7 +150,7 @@ void test_ssm_layer_f32(void) {
     printf("    pos = 1 completed successfully. Recurrent state is updated.\n");
 
     printf("  Running forward pass at pos = 2...\n");
-    ssm_layer_forward(hidden_state, 2, layer_idx, &weights, state, scratch);
+    ssm_layer_forward(hidden_state, 2, layer_idx, &weights, state, scratch, &cfg);
     for (int i = 0; i < hidden_size; i++) {
         assert(!is_invalid(hidden_state[i]));
     }

@@ -3,25 +3,24 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "model_config.h"
 
 // Temporary scratch space for forward pass activations and streaming
 typedef struct {
-    // 128 MiB total streaming buffers, split into two 64 MiB buffers
     uint8_t *stream_buffer;
     size_t stream_buffer_size;
 
     // Activations (floats)
-    float *hidden_state;    // size 5120
-    float *ffn_gate;        // size 17408
-    float *ffn_up;          // size 17408
-    float *attn_q;          // size 12288
-    float *attn_kv;         // size 1024
-    float *ssm_qkv;         // size 10240
-    float *logits;          // size 248320
+    float *hidden_state;    // size hidden_dim
+    float *ffn_gate;        // size ffn_dim
+    float *ffn_up;          // size ffn_dim
+    float *attn_q;          // size q_total_dim
+    float *attn_kv;         // size kv_total_dim
+    float *ssm_qkv;         // size ssm_conv_dim
+    float *logits;          // size vocab_size
 } scratch_buffers;
 
-// Allocation and lifecycle functions
-scratch_buffers *allocate_scratch_buffers(void);
+scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg);
 void free_scratch_buffers(scratch_buffers *scratch);
 
 #endif // SCRATCH_H

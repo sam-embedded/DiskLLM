@@ -22,10 +22,26 @@ void test_attention_f32(void) {
     int kv_size = 1024;
     int out_size = 6144;
 
+    qwen_model_config cfg = {
+        .block_count = 64,
+        .hidden_dim = 5120,
+        .ffn_dim = 17408,
+        .num_attn_heads = 24,
+        .num_kv_heads = 4,
+        .key_length = 256,
+        .value_length = 256,
+        .rope_freq_base = 10000000.0f,
+        .rope_dim = 64,
+        .vocab_size = 248320
+    };
+    for (int b = 0; b < 64; b++) {
+        cfg.layer_types[b] = (b - 3) % 4 == 0 ? LAYER_TYPE_ATTENTION : LAYER_TYPE_SSM;
+    }
+
     // Allocate state and scratch
-    model_state *state = allocate_model_state(context_length);
+    model_state *state = allocate_model_state(&cfg, context_length);
     assert(state != NULL);
-    scratch_buffers *scratch = allocate_scratch_buffers();
+    scratch_buffers *scratch = allocate_scratch_buffers(&cfg);
     assert(scratch != NULL);
 
     // Allocate memory for F32 weights
@@ -79,13 +95,11 @@ void test_attention_f32(void) {
         hidden_state[i] = 0.1f * (i % 3 + 1); // 0.1, 0.2, 0.3
     }
 
-    double freq_base = 10000000.0;
-    int rope_dim = 64;
     int layer_idx = 3; // first attention layer (index % 4 == 3)
 
     // Call attention_forward at pos = 0
     printf("  Running forward pass at pos = 0...\n");
-    attention_forward(hidden_state, 0, layer_idx, &weights, state, scratch, freq_base, rope_dim);
+    attention_forward(hidden_state, 0, layer_idx, &weights, state, scratch, &cfg);
 
     // Verify output
     for (int i = 0; i < hidden_size; i++) {
@@ -99,7 +113,7 @@ void test_attention_f32(void) {
         hidden_state[i] = 0.05f * (i % 5 + 1);
     }
     printf("  Running forward pass at pos = 1...\n");
-    attention_forward(hidden_state, 1, layer_idx, &weights, state, scratch, freq_base, rope_dim);
+    attention_forward(hidden_state, 1, layer_idx, &weights, state, scratch, &cfg);
 
     for (int i = 0; i < hidden_size; i++) {
         assert(!is_nan(hidden_state[i]));
