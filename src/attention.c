@@ -5,6 +5,10 @@
 #include <string.h>
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 static inline uint16_t fp32_to_fp16(float val) {
     union {
         float f;
@@ -59,11 +63,30 @@ static inline float fp16_to_fp32(uint16_t h) {
     return conv.f;
 }
 
-static void apply_rope(float * restrict vec, int pos, double freq_base, int rope_dim) {
+static void apply_rope(float * restrict vec, int pos, double freq_base, int rope_dim, const qwen_model_config *cfg) {
     int half_dim = rope_dim / 2;
+    double scaling_factor = (cfg && cfg->rope_scaling_factor > 1.0f) ? (double)cfg->rope_scaling_factor : 1.0;
+    int orig_len = (cfg && cfg->rope_orig_context_len > 0) ? cfg->rope_orig_context_len : 4096;
+    int scaling_type = cfg ? (int)cfg->rope_scaling_type : 0;
+
     for (int i = 0; i < half_dim; i++) {
         double freq = 1.0 / pow(freq_base, (double)(2 * i) / rope_dim);
         double theta = (double)pos * freq;
+
+        if (scaling_type == ROPE_SCALING_LINEAR && scaling_factor > 1.0) {
+            theta /= scaling_factor;
+        } else if (scaling_type == ROPE_SCALING_YARN && scaling_factor > 1.0) {
+            double wavelength = 2.0 * M_PI / freq;
+            double b_fast = (cfg->rope_beta_fast > 0) ? (double)cfg->rope_beta_fast : 32.0;
+            double b_slow = (cfg->rope_beta_slow > 0) ? (double)cfg->rope_beta_slow : 1.0;
+            double gamma = (wavelength - b_slow * (double)orig_len) / ((b_fast - b_slow) * (double)orig_len);
+            if (gamma < 0.0) gamma = 0.0;
+            if (gamma > 1.0) gamma = 1.0;
+
+            double s_i = (1.0 - gamma) + gamma * scaling_factor;
+            theta /= s_i;
+        }
+
         float cos_val = (float)cos(theta);
         float sin_val = (float)sin(theta);
 
@@ -141,11 +164,11 @@ void attention_forward(
     /* 2.4 Apply RoPE to Q and K */
     for (int h_q = 0; h_q < num_attn_heads; h_q++) {
         float *q_head = scratch->attn_q + h_q * q_dim_per_head;
-        apply_rope(q_head, pos, freq_base, rope_dim);
+        apply_rope(q_head, pos, freq_base, rope_dim, cfg);
     }
     for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
         float *k_head = scratch->attn_kv + h_kv * head_dim;
-        apply_rope(k_head, pos, freq_base, rope_dim);
+        apply_rope(k_head, pos, freq_base, rope_dim, cfg);
     }
 
     /* 2.5 Store Key in the KV Cache */
@@ -178,6 +201,10 @@ void attention_forward(
     float *attn_out = scratch->ffn_gate;
     float *scores = scratch->ffn_up;
     float scale = 1.0f / sqrtf((float)head_dim);
+    if (cfg && cfg->rope_scaling_type == ROPE_SCALING_YARN && cfg->rope_scaling_factor > 1.0f) {
+        float yarn_attn_scale = (cfg->rope_attn_factor > 0.0f) ? cfg->rope_attn_factor : (0.1f * logf(cfg->rope_scaling_factor) + 1.0f);
+        scale *= yarn_attn_scale;
+    }
 
     for (int h_q = 0; h_q < num_attn_heads; h_q++) {
         int h_kv = h_q / (group_size > 0 ? group_size : 1);

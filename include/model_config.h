@@ -12,6 +12,12 @@ typedef enum {
     MODEL_TYPE_UNSUPPORTED = 2
 } model_type_enum;
 
+typedef enum {
+    ROPE_SCALING_NONE = 0,
+    ROPE_SCALING_LINEAR = 1,
+    ROPE_SCALING_YARN = 2
+} rope_scaling_type_enum;
+
 typedef struct qwen_model_config {
     char architecture[64];
     char model_name[64];
@@ -30,6 +36,15 @@ typedef struct qwen_model_config {
 
     float rope_freq_base;
     int rope_dim;
+
+    rope_scaling_type_enum rope_scaling_type;
+    float rope_scaling_factor;
+    int rope_orig_context_len;
+    float rope_ext_factor;
+    float rope_attn_factor;
+    float rope_beta_fast;
+    float rope_beta_slow;
+    int max_context_length;
 
     int ssm_conv_kernel;
     int ssm_state_size;

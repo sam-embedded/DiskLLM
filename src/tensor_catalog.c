@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <inttypes.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -698,6 +699,26 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
 
     GET_FLT(cfg->rope_freq_base, "rope.freq_base", 10000000.0f);
     GET_U32(cfg->rope_dim, "rope.dimension_count", 64);
+
+    GET_FLT(cfg->rope_scaling_factor, "rope.scaling.factor", 1.0f);
+    GET_U32(cfg->rope_orig_context_len, "rope.scaling.original_context_length", 4096);
+    GET_FLT(cfg->rope_ext_factor, "rope.scaling.ext_factor", 1.0f);
+    GET_FLT(cfg->rope_attn_factor, "rope.scaling.attn_factor", 1.0f);
+    GET_FLT(cfg->rope_beta_fast, "rope.scaling.beta_fast", 32.0f);
+    GET_FLT(cfg->rope_beta_slow, "rope.scaling.beta_slow", 1.0f);
+    GET_U32(cfg->max_context_length, "context_length", 262144);
+
+    cfg->rope_scaling_type = ROPE_SCALING_NONE;
+    char type_str[64] = {0};
+    snprintf(key_buf, sizeof(key_buf), "%s.rope.scaling.type", cfg->architecture);
+    if (get_metadata_string(filepath, key_buf, type_str, sizeof(type_str)) != 0) {
+        snprintf(key_buf, sizeof(key_buf), "qwen35.rope.scaling.type");
+        get_metadata_string(filepath, key_buf, type_str, sizeof(type_str));
+    }
+    if (type_str[0]) {
+        if (!strcasecmp(type_str, "yarn")) cfg->rope_scaling_type = ROPE_SCALING_YARN;
+        else if (!strcasecmp(type_str, "linear")) cfg->rope_scaling_type = ROPE_SCALING_LINEAR;
+    }
 
     GET_U32(cfg->ssm_conv_kernel, "ssm.conv_kernel", 4);
     GET_U32(cfg->ssm_state_size, "ssm.state_size", 128);
