@@ -188,6 +188,8 @@ static void apply_rope(float * restrict vec, int pos, double freq_base, int rope
     int orig_len = (cfg && cfg->rope_orig_context_len > 0) ? cfg->rope_orig_context_len : 4096;
     int scaling_type = cfg ? (int)cfg->rope_scaling_type : 0;
 
+    int is_neox = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
+
     for (int i = 0; i < half_dim; i++) {
         double freq = 1.0 / pow(freq_base, (double)(2 * i) / rope_dim);
         double theta = (double)pos * freq;
@@ -209,11 +211,17 @@ static void apply_rope(float * restrict vec, int pos, double freq_base, int rope
         float cos_val = (float)cos(theta);
         float sin_val = (float)sin(theta);
 
-        float x0 = vec[i];
-        float x1 = vec[i + half_dim];
-
-        vec[i]            = x0 * cos_val - x1 * sin_val;
-        vec[i + half_dim] = x0 * sin_val + x1 * cos_val;
+        if (is_neox) {
+            float x0 = vec[i];
+            float x1 = vec[i + half_dim];
+            vec[i]            = x0 * cos_val - x1 * sin_val;
+            vec[i + half_dim] = x0 * sin_val + x1 * cos_val;
+        } else {
+            float x0 = vec[2 * i];
+            float x1 = vec[2 * i + 1];
+            vec[2 * i]     = x0 * cos_val - x1 * sin_val;
+            vec[2 * i + 1] = x0 * sin_val + x1 * cos_val;
+        }
     }
 }
 

@@ -721,10 +721,18 @@ int main(int argc, char **argv) {
         size_t blen = strlen(prompt_text) + (system_text ? strlen(system_text) : 0) + 512;
         char *chat_buf = malloc(blen);
         if (chat_buf) {
-            if (system_text) {
-                snprintf(chat_buf, blen, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_text, prompt_text);
+            if (cfg->model_type == MODEL_TYPE_LLAMA) {
+                if (system_text) {
+                    snprintf(chat_buf, blen, "<|start_header_id|>system<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", system_text, prompt_text);
+                } else {
+                    snprintf(chat_buf, blen, "<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", prompt_text);
+                }
             } else {
-                snprintf(chat_buf, blen, "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt_text);
+                if (system_text) {
+                    snprintf(chat_buf, blen, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_text, prompt_text);
+                } else {
+                    snprintf(chat_buf, blen, "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt_text);
+                }
             }
             prompt_text = chat_buf;
         }
@@ -1526,7 +1534,13 @@ int main(int argc, char **argv) {
         if (gen_count > 0)
             fprintf(stderr, "Gen speed      : %.2f ms/tok\n",
                    (t_gen_end - t_gen_start) / gen_count);
-        fprintf(stderr, "Bytes read     : %llu\n", (unsigned long long)bytes_read);
+        if (bytes_read >= (1024ULL * 1024ULL * 1024ULL)) {
+            fprintf(stderr, "Bytes read     : %.2f GB (%llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0 * 1024.0), (unsigned long long)bytes_read);
+        } else if (bytes_read >= (1024ULL * 1024ULL)) {
+            fprintf(stderr, "Bytes read     : %.2f MB (%llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0), (unsigned long long)bytes_read);
+        } else {
+            fprintf(stderr, "Bytes read     : %llu bytes\n", (unsigned long long)bytes_read);
+        }
         fprintf(stderr, "Peak RSS       : %ld MB\n", peak_rss);
     }
 
