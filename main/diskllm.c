@@ -13,6 +13,7 @@
 #include "stream.h"
 #include "tokenizer.h"
 #include "model_config.h"
+#include "speculative.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -512,12 +513,15 @@ int main(int argc, char **argv) {
         .seed        = 0,
     };
 
+    int      speculate_k         = 0;
+
     for (int i = 1; i < argc; i++) {
 #define NEXTARG(dst) do { if (i+1>=argc){fprintf(stderr,"Missing arg for %s\n",argv[i]);return 1;} dst = argv[++i]; } while(0)
 #define NEXTINT(dst) do { if (i+1>=argc){fprintf(stderr,"Missing arg for %s\n",argv[i]);return 1;} dst = atoi(argv[++i]); } while(0)
 #define NEXTFLT(dst) do { if (i+1>=argc){fprintf(stderr,"Missing arg for %s\n",argv[i]);return 1;} dst = (float)atof(argv[++i]); } while(0)
         if      (!strcmp(argv[i],"--model"))            { NEXTARG(model_path); }
         else if (!strcmp(argv[i],"--arch"))             { NEXTARG(arch_str); }
+        else if (!strcmp(argv[i],"--speculate"))        { NEXTINT(speculate_k); }
         else if (!strcmp(argv[i],"--prompt"))           { NEXTARG(prompt_text); }
         else if (!strcmp(argv[i],"--system"))           { NEXTARG(system_text); }
         else if (!strcmp(argv[i],"--prompt-ids"))        { NEXTARG(prompt_ids_str); }
@@ -804,6 +808,25 @@ int main(int argc, char **argv) {
         } else {
             if (!quiet) fprintf(stderr, "[INFO] mmap failed for output.weight, falling back to chunked pread streaming.\n");
         }
+    }
+
+    nextn_weights nweights = {0};
+    int has_nextn_weights = 0;
+    uint8_t *nextn_buf = NULL;
+
+    if (cfg->has_nextn) {
+        if (!is_mmap_mode) {
+            nextn_buf = malloc(100ULL * 1024 * 1024);
+        }
+        if (load_nextn_weights(fd, catalog, cfg, g_mmap_full, &nweights, nextn_buf, &bytes_read) == 0) {
+            has_nextn_weights = 1;
+            if (!quiet) fprintf(stderr, "[INFO] Loaded NextN prediction head weights.\n");
+        }
+    }
+
+    if (speculate_k > 0 && !has_nextn_weights) {
+        if (!quiet) fprintf(stderr, "[WARNING] Model does not contain NextN prediction head. Speculative decoding disabled.\n");
+        speculate_k = 0;
     }
 
     if (warm_cache) {

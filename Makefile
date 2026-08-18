@@ -15,7 +15,7 @@ LFLAGS = -lm -lpthread
 SRCS_CORE = src/attention.c src/ssm.c src/dequant.c src/rmsnorm.c \
             src/swiglu.c src/matvec.c src/state.c src/scratch.c \
             src/tensor_catalog.c src/layer_map.c src/sampler.c src/stream.c \
-            src/tokenizer.c
+            src/tokenizer.c src/speculative.c
 
 all: gguf_dump tensor_map probe_model bench_stream test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm
 
@@ -46,10 +46,13 @@ test_ssm: tools/test_ssm.c src/ssm.c src/dequant.c src/rmsnorm.c src/swiglu.c sr
 test_tokenizer: tools/test_tokenizer.c src/tokenizer.c
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
+test_speculative: tools/test_speculative.c src/speculative.c src/tensor_catalog.c src/layer_map.c src/dequant.c src/rmsnorm.c src/swiglu.c src/matvec.c src/scratch.c
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
 diskllm: main/diskllm.c $(SRCS_CORE)
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 clean:
 	rm -f gguf_dump tensor_map probe_model bench_stream \
-	      test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm
+	      test_dequant test_kernels test_attention test_ssm test_tokenizer test_speculative diskllm
 
