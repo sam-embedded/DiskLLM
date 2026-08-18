@@ -89,12 +89,14 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, int li,
 #define LOAD(field, name_fmt, type_field) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
     const tensor_info *_ti = find_tensor(cat, nm); \
+    if (!_ti) { fprintf(stderr, "[ERROR] Missing layer tensor: %s\n", nm); return -1; } \
     if (load_tensor_to_buf(fd, _ti, p, ctr) != 0) return -1; \
     field = (const void *)p; type_field = _ti->type; p += _ti->byte_size; \
 } while(0)
 #define LOAD_NORM(field, name_fmt) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
     const tensor_info *_ti = find_tensor(cat, nm); \
+    if (!_ti) { fprintf(stderr, "[ERROR] Missing layer tensor: %s\n", nm); return -1; } \
     if (load_tensor_to_buf(fd, _ti, p, ctr) != 0) return -1; \
     field = (const float *)p; p += _ti->byte_size; \
 } while(0)
@@ -137,14 +139,14 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, int li,
 #define LOAD_MMAP(field, name_fmt, type_field) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
     const tensor_info *_ti = find_tensor(cat, nm); \
-    if (!_ti) return -1; \
+    if (!_ti) { fprintf(stderr, "[ERROR] Missing layer tensor: %s\n", nm); return -1; } \
     field = (const void *)(mmap_base + _ti->absolute_offset); \
     type_field = _ti->type; \
 } while(0)
 #define LOAD_NORM_MMAP(field, name_fmt) do { \
     snprintf(nm, sizeof(nm), name_fmt, li); \
     const tensor_info *_ti = find_tensor(cat, nm); \
-    if (!_ti) return -1; \
+    if (!_ti) { fprintf(stderr, "[ERROR] Missing layer tensor: %s\n", nm); return -1; } \
     field = (const float *)(mmap_base + _ti->absolute_offset); \
 } while(0)
 
@@ -386,7 +388,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  --warm-cache                 Pre-warm OS page cache before inference\n");
     fprintf(stderr, "  --profile-decode             Print fine-grained per-token decode timing breakdown\n");
     fprintf(stderr, "  --log-io-per-token           Log logical vs physical disk reads per token\n");
-    fprintf(stderr, "  --log-rss                    Print resident memory usage (RSS) at key checkpoints\n");
+    fprintf(stderr, "  --print-missing-tensors      Inspect GGUF tensor catalog and report all missing expected tensors\n");
     fprintf(stderr, "  --quiet                      Suppress informational logs; print ONLY generated text\n");
     fprintf(stderr, "  --version                    Print version info and exit\n");
     fprintf(stderr, "  -h, --help                   Show this help message\n\n");
@@ -400,6 +402,129 @@ static void print_usage(const char *prog) {
 #define MODEL_EMBED_ROW_Q4K  2880   /* 5120/256 blocks * 144 bytes */
 #define MODEL_LOGIT_ROW_Q6K  4200   /* 5120/256 blocks * 210 bytes */
 #define MODEL_LAYERS 64
+
+static void run_missing_tensor_diagnostics(const tensor_catalog *cat) {
+    printf("=== DiskLLM Missing Tensor Diagnostics ===\n");
+    printf("Loaded GGUF catalog containing %d tensors.\n\n", cat->count);
+
+    /* 1. Core tensors resolution */
+    const char *core_tensors[] = {
+        "token_embd.weight",
+        "output_norm.weight",
+        "output.weight"
+    };
+    int missing_core_count = 0;
+    printf("--- Core Tensors Resolution ---\n");
+    for (size_t i = 0; i < sizeof(core_tensors)/sizeof(core_tensors[0]); i++) {
+        const tensor_info *ti = find_tensor(cat, core_tensors[i]);
+        if (ti) {
+            printf("  [FOUND]   %-32s (type %d, offset %llu)\n", core_tensors[i], ti->type, (unsigned long long)ti->absolute_offset);
+        } else {
+            printf("  [MISSING] %-32s\n", core_tensors[i]);
+            missing_core_count++;
+        }
+    }
+
+    /* 2. Block detection */
+    int block_present[1024] = {0};
+    int max_block = -1;
+    int num_blocks_found = 0;
+    int has_ssm = 0;
+    int has_nextn = 0;
+
+    for (int i = 0; i < cat->count; i++) {
+        const char *name = cat->tensors[i].name;
+        if (strstr(name, ".ssm_") != NULL) has_ssm = 1;
+        if (strstr(name, ".nextn.") != NULL) has_nextn = 1;
+
+        if (strncmp(name, "blk.", 4) == 0) {
+            int blk_idx = atoi(name + 4);
+            if (blk_idx >= 0 && blk_idx < 1024) {
+                if (!block_present[blk_idx]) {
+                    block_present[blk_idx] = 1;
+                    num_blocks_found++;
+                    if (blk_idx > max_block) max_block = blk_idx;
+                }
+            }
+        }
+    }
+
+    printf("\n--- Architecture Feature Inspection ---\n");
+    if (num_blocks_found > 0) {
+        printf("  Detected Block Count : %d (indices 0..%d)\n", num_blocks_found, max_block);
+    } else {
+        printf("  Detected Block Count : 0\n");
+    }
+    printf("  SSM Tensors Exist    : %s\n", has_ssm ? "YES" : "NO");
+    printf("  NextN Tensors Exist  : %s\n", has_nextn ? "YES" : "NO");
+
+    /* 3. Layer tensor resolution */
+    printf("\n--- Per-Block Tensor Resolution ---\n");
+    int missing_block_tensors = 0;
+    for (int b = 0; b <= max_block; b++) {
+        if (!block_present[b]) continue;
+
+        char nm[256];
+        snprintf(nm, sizeof(nm), "blk.%d.ssm_a", b);
+        int is_ssm_layer = (find_tensor(cat, nm) != NULL);
+
+        if (is_ssm_layer) {
+            const char *expected_ssm[] = {
+                "blk.%d.attn_norm.weight",
+                "blk.%d.attn_qkv.weight",
+                "blk.%d.ssm_conv1d.weight",
+                "blk.%d.ssm_a",
+                "blk.%d.ssm_alpha.weight",
+                "blk.%d.ssm_beta.weight",
+                "blk.%d.ssm_dt.bias",
+                "blk.%d.ssm_norm.weight",
+                "blk.%d.ssm_out.weight",
+                "blk.%d.attn_gate.weight",
+                "blk.%d.post_attention_norm.weight",
+                "blk.%d.ffn_gate.weight",
+                "blk.%d.ffn_up.weight",
+                "blk.%d.ffn_down.weight"
+            };
+            for (size_t k = 0; k < sizeof(expected_ssm)/sizeof(expected_ssm[0]); k++) {
+                snprintf(nm, sizeof(nm), expected_ssm[k], b);
+                if (!find_tensor(cat, nm)) {
+                    printf("  [MISSING] Block %d: %s\n", b, nm);
+                    missing_block_tensors++;
+                }
+            }
+        } else {
+            const char *expected_attn[] = {
+                "blk.%d.attn_norm.weight",
+                "blk.%d.attn_q.weight",
+                "blk.%d.attn_q_norm.weight",
+                "blk.%d.attn_k.weight",
+                "blk.%d.attn_k_norm.weight",
+                "blk.%d.attn_v.weight",
+                "blk.%d.attn_output.weight",
+                "blk.%d.post_attention_norm.weight",
+                "blk.%d.ffn_gate.weight",
+                "blk.%d.ffn_up.weight",
+                "blk.%d.ffn_down.weight"
+            };
+            for (size_t k = 0; k < sizeof(expected_attn)/sizeof(expected_attn[0]); k++) {
+                snprintf(nm, sizeof(nm), expected_attn[k], b);
+                if (!find_tensor(cat, nm)) {
+                    printf("  [MISSING] Block %d: %s\n", b, nm);
+                    missing_block_tensors++;
+                }
+            }
+        }
+    }
+
+    printf("\n--- Diagnostic Summary ---\n");
+    printf("  Total Core Tensors Missing  : %d\n", missing_core_count);
+    printf("  Total Block Tensors Missing : %d\n", missing_block_tensors);
+    if (missing_core_count == 0 && missing_block_tensors == 0) {
+        printf("  Result: ALL EXPECTED TENSORS ARE PRESENT.\n");
+    } else {
+        printf("  Result: MISSING TENSORS DETECTED.\n");
+    }
+}
 
 static void run_bench_matvec(void) {
     int in_features = 5120;
@@ -486,6 +611,7 @@ int main(int argc, char **argv) {
     int      lookup_id_val       = -1;
     char    *lookup_ids_arg      = NULL;
     char    *search_token_q      = NULL;
+    int      print_missing_tensors_flag = 0;
     int      extra_stops[32]; int extra_stop_cnt = 0;
 
     sampler_config scfg = {
@@ -508,6 +634,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--save-state"))       { NEXTARG(save_state_path); }
         else if (!strcmp(argv[i],"--load-state"))       { NEXTARG(load_state_path); }
         else if (!strcmp(argv[i],"--state-info"))       { NEXTARG(state_info_file); }
+        else if (!strcmp(argv[i],"--print-missing-tensors")) { print_missing_tensors_flag = 1; }
         else if (!strcmp(argv[i],"--prefill-mode"))     { NEXTARG(prefill_mode_str); }
         else if (!strcmp(argv[i],"--threads") || !strcmp(argv[i],"-t")) { NEXTINT(num_threads); }
         else if (!strcmp(argv[i],"--max-tokens"))        { NEXTINT(max_tokens); }
@@ -565,6 +692,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error: --model is required.\n");
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (print_missing_tensors_flag) {
+        tensor_catalog *catalog = load_tensor_catalog(model_path);
+        if (!catalog) {
+            fprintf(stderr, "Error: Failed to load tensor catalog for %s\n", model_path);
+            return 1;
+        }
+        run_missing_tensor_diagnostics(catalog);
+        free_tensor_catalog(catalog);
+        return 0;
     }
 
     /* ── Vocabulary-only commands ── */
@@ -703,14 +841,23 @@ int main(int argc, char **argv) {
     int fd = sctx->fd;
 
     /* ── Load output norm ── */
-    const tensor_info *ti_onorm = find_tensor(catalog, "output_norm.weight");
-    float *output_norm = malloc(ti_onorm->byte_size);
     uint64_t bytes_read = 0;
-    if (load_tensor_to_buf(fd, ti_onorm, output_norm, &bytes_read) != 0) return 1;
+    const tensor_info *ti_onorm = find_tensor(catalog, "output_norm.weight");
+    float *output_norm = NULL;
+    if (ti_onorm) {
+        output_norm = malloc(ti_onorm->byte_size);
+        if (load_tensor_to_buf(fd, ti_onorm, output_norm, &bytes_read) != 0) return 1;
+    }
 
     const tensor_info *ti_emb  = find_tensor(catalog, "token_embd.weight");
     const tensor_info *ti_outw = find_tensor(catalog, "output.weight");
-    if (!ti_emb || !ti_outw) { fprintf(stderr,"Core tensors missing.\n"); return 1; }
+    int missing_core = 0;
+    if (!ti_emb)   { fprintf(stderr, "[ERROR] Missing core tensor: token_embd.weight\n"); missing_core++; }
+    if (!ti_onorm) { fprintf(stderr, "[ERROR] Missing core tensor: output_norm.weight\n"); missing_core++; }
+    if (!ti_outw)  { fprintf(stderr, "[ERROR] Missing core tensor: output.weight\n"); missing_core++; }
+    if (missing_core > 0) {
+        return 1;
+    }
 
     int is_mmap_mode = (!strcmp(io_mode_str, "mmap"));
     const uint8_t *g_mmap_full = NULL;
