@@ -1,5 +1,6 @@
 #include "attention.h"
 #include "kernels.h"
+#include "dequant.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,33 +35,151 @@ static inline uint16_t fp32_to_fp16(float val) {
     }
 }
 
-static inline float fp16_to_fp32(uint16_t h) {
-    union {
-        uint32_t u;
-        float f;
-    } conv;
-    uint32_t sign = (h & 0x8000) << 16;
-    uint32_t exp = (h & 0x7c00) >> 10;
-    uint32_t mant = h & 0x03ff;
-
-    if (exp == 0) {
-        if (mant == 0) {
-            conv.u = sign;
-            return conv.f;
+static inline void quantize_q8_0(const float * restrict src, void * restrict dst, int k) {
+    int nb = k / 32;
+    block_q8_0 *b_dst = (block_q8_0 *)dst;
+    for (int i = 0; i < nb; i++) {
+        const float *x = src + i * 32;
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            float v = fabsf(x[j]);
+            if (v > amax) amax = v;
         }
-        while ((mant & 0x0400) == 0) {
-            mant <<= 1;
-            exp--;
+        float d = amax / 127.0f;
+        float id = d ? 1.0f / d : 0.0f;
+        b_dst[i].d = fp32_to_fp16(d);
+        for (int j = 0; j < 32; j++) {
+            int val = (int)roundf(x[j] * id);
+            if (val > 127) val = 127;
+            if (val < -127) val = -127;
+            b_dst[i].qs[j] = (int8_t)val;
         }
-        exp++;
-        mant &= ~0x0400;
-    } else if (exp == 31) {
-        conv.u = sign | 0x7f800000 | (mant << 13);
-        return conv.f;
     }
+}
 
-    conv.u = sign | (((exp - 15 + 127) & 0xff) << 23) | (mant << 13);
-    return conv.f;
+static inline void quantize_q4_0(const float * restrict src, void * restrict dst, int k) {
+    int nb = k / 32;
+    block_q4_0 *b_dst = (block_q4_0 *)dst;
+    for (int i = 0; i < nb; i++) {
+        const float *x = src + i * 32;
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            float v = fabsf(x[j]);
+            if (v > amax) amax = v;
+        }
+        float d = amax / 7.0f;
+        float id = d ? 1.0f / d : 0.0f;
+        b_dst[i].d = fp32_to_fp16(d);
+        for (int j = 0; j < 16; j++) {
+            int val0 = (int)roundf(x[j] * id) + 8;
+            int val1 = (int)roundf(x[j + 16] * id) + 8;
+            if (val0 < 0) val0 = 0;
+            if (val0 > 15) val0 = 15;
+            if (val1 < 0) val1 = 0;
+            if (val1 > 15) val1 = 15;
+            b_dst[i].qs[j] = (uint8_t)(val0 | (val1 << 4));
+        }
+    }
+}
+
+static inline void store_kv_vector(void * restrict dst, const float * restrict src, int k_dim, cache_type_t ctype) {
+    if (ctype == CACHE_TYPE_Q8_0) {
+        quantize_q8_0(src, dst, k_dim);
+    } else if (ctype == CACHE_TYPE_Q4_0) {
+        quantize_q4_0(src, dst, k_dim);
+    } else {
+        uint16_t *f16_dst = (uint16_t *)dst;
+        for (int i = 0; i < k_dim; i++) {
+            f16_dst[i] = fp32_to_fp16(src[i]);
+        }
+    }
+}
+
+static inline float dot_q8_0_f32(const block_q8_0 * restrict k_block, const float * restrict q_head, int head_dim) {
+    int nb = head_dim / 32;
+    double sum = 0.0;
+    for (int b = 0; b < nb; b++) {
+        float d = fp16_to_fp32(k_block[b].d);
+        const int8_t *qs = k_block[b].qs;
+        const float *q = q_head + b * 32;
+        float bsum = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            bsum += (float)qs[j] * q[j];
+        }
+        sum += (double)bsum * (double)d;
+    }
+    return (float)sum;
+}
+
+static inline float dot_q4_0_f32(const block_q4_0 * restrict k_block, const float * restrict q_head, int head_dim) {
+    int nb = head_dim / 32;
+    double sum = 0.0;
+    for (int b = 0; b < nb; b++) {
+        float d = fp16_to_fp32(k_block[b].d);
+        const uint8_t *qs = k_block[b].qs;
+        const float *q = q_head + b * 32;
+        float bsum = 0.0f;
+        for (int j = 0; j < 16; j++) {
+            uint8_t qv = qs[j];
+            int v0 = (qv & 0x0F) - 8;
+            int v1 = (qv >> 4) - 8;
+            bsum += (float)v0 * q[j] + (float)v1 * q[j + 16];
+        }
+        sum += (double)bsum * (double)d;
+    }
+    return (float)sum;
+}
+
+static inline float compute_qk_score(const void * restrict k_head_ptr, const float * restrict q_head, int head_dim, cache_type_t ctype) {
+    if (ctype == CACHE_TYPE_Q8_0) {
+        return dot_q8_0_f32((const block_q8_0 *)k_head_ptr, q_head, head_dim);
+    } else if (ctype == CACHE_TYPE_Q4_0) {
+        return dot_q4_0_f32((const block_q4_0 *)k_head_ptr, q_head, head_dim);
+    } else {
+        const uint16_t *k_f16 = (const uint16_t *)k_head_ptr;
+        double sum = 0.0;
+        for (int j = 0; j < head_dim; j++) {
+            float k_val = fp16_to_fp32(k_f16[j]);
+            sum += (double)q_head[j] * (double)k_val;
+        }
+        return (float)sum;
+    }
+}
+
+static inline void add_v_scaled(float * restrict out_head, const void * restrict v_head_ptr, float prob, int head_dim, cache_type_t ctype) {
+    if (ctype == CACHE_TYPE_Q8_0) {
+        const block_q8_0 *v_block = (const block_q8_0 *)v_head_ptr;
+        int nb = head_dim / 32;
+        for (int b = 0; b < nb; b++) {
+            float scale = prob * fp16_to_fp32(v_block[b].d);
+            float *out = out_head + b * 32;
+            const int8_t *qs = v_block[b].qs;
+            for (int j = 0; j < 32; j++) {
+                out[j] += scale * (float)qs[j];
+            }
+        }
+    } else if (ctype == CACHE_TYPE_Q4_0) {
+        const block_q4_0 *v_block = (const block_q4_0 *)v_head_ptr;
+        int nb = head_dim / 32;
+        for (int b = 0; b < nb; b++) {
+            float scale = prob * fp16_to_fp32(v_block[b].d);
+            float *out = out_head + b * 32;
+            const uint8_t *qs = v_block[b].qs;
+            for (int j = 0; j < 16; j++) {
+                uint8_t qv = qs[j];
+                int v0 = (qv & 0x0F) - 8;
+                int v1 = (qv >> 4) - 8;
+                out[j]      += scale * (float)v0;
+                out[j + 16] += scale * (float)v1;
+            }
+        }
+    } else {
+        const uint16_t *v_f16 = (const uint16_t *)v_head_ptr;
+        for (int j = 0; j < head_dim; j++) {
+            float v_val = fp16_to_fp32(v_f16[j]);
+            out_head[j] += prob * v_val;
+        }
+    }
 }
 
 static void apply_rope(float * restrict vec, int pos, double freq_base, int rope_dim, const qwen_model_config *cfg) {
@@ -172,14 +291,21 @@ void attention_forward(
         apply_rope(k_head, pos, freq_base, rope_dim, cfg);
     }
 
-    /* 2.5 Store Key in the KV Cache */
     int cache_layer_idx = state->layer_to_attn_idx[layer_idx];
     if (cache_layer_idx < 0) cache_layer_idx = 0;
-    uint16_t *layer_cache = state->kv_cache + (size_t)cache_layer_idx * state->context_length * 2 * state->kv_dim;
-    uint16_t *cache_k = layer_cache + (size_t)pos * 2 * state->kv_dim;
-    for (int i = 0; i < k_total_dim; i++) {
-        cache_k[i] = fp32_to_fp16(scratch->attn_kv[i]);
-    }
+
+    cache_type_t ctype = state->cache_type;
+    size_t kv_token_bytes = state->kv_token_bytes;
+    size_t vec_bytes = kv_token_bytes / 2;
+    size_t head_k_bytes = vec_bytes / (num_kv_heads > 0 ? num_kv_heads : 1);
+    size_t head_v_bytes = head_k_bytes;
+
+    uint8_t *layer_cache = (uint8_t *)state->kv_cache + (size_t)cache_layer_idx * (size_t)state->context_length * kv_token_bytes;
+    uint8_t *cache_k = layer_cache + (size_t)pos * kv_token_bytes;
+    uint8_t *cache_v = cache_k + vec_bytes;
+
+    /* 2.5 Store Key in the KV Cache */
+    store_kv_vector(cache_k, scratch->attn_kv, k_total_dim, ctype);
 
     /* 2.6 Project Value */
     matvec(
@@ -193,10 +319,7 @@ void attention_forward(
     );
 
     /* 2.7 Store Value in the KV Cache */
-    uint16_t *cache_v = cache_k + state->kv_dim;
-    for (int i = 0; i < v_total_dim; i++) {
-        cache_v[i] = fp32_to_fp16(scratch->attn_kv[i]);
-    }
+    store_kv_vector(cache_v, scratch->attn_kv, v_total_dim, ctype);
 
     /* Step 3: Attention Computation (Grouped-Query Attention) */
     float *attn_out = scratch->ffn_gate;
@@ -212,15 +335,11 @@ void attention_forward(
         const float *q_head = scratch->attn_q + h_q * q_dim_per_head;
 
         for (int p = 0; p <= pos; p++) {
-            const uint16_t *p_cache_k = layer_cache + (size_t)p * 2 * state->kv_dim;
-            const uint16_t *k_cache_head = p_cache_k + h_kv * head_dim;
+            const uint8_t *p_cache_k = layer_cache + (size_t)p * kv_token_bytes;
+            const void *k_head_ptr = p_cache_k + (size_t)h_kv * head_k_bytes;
 
-            double sum = 0.0;
-            for (int j = 0; j < head_dim; j++) {
-                float k_val = fp16_to_fp32(k_cache_head[j]);
-                sum += (double)q_head[j] * (double)k_val;
-            }
-            scores[p] = (float)sum * scale;
+            float score = compute_qk_score(k_head_ptr, q_head, head_dim, ctype);
+            scores[p] = score * scale;
         }
 
         float max_score = scores[0];
@@ -244,13 +363,10 @@ void attention_forward(
 
         for (int p = 0; p <= pos; p++) {
             float prob = scores[p];
-            const uint16_t *p_cache_v = layer_cache + (size_t)p * 2 * state->kv_dim + state->kv_dim;
-            const uint16_t *v_cache_head = p_cache_v + h_kv * head_dim;
+            const uint8_t *p_cache_v = layer_cache + (size_t)p * kv_token_bytes + vec_bytes;
+            const void *v_head_ptr = p_cache_v + (size_t)h_kv * head_v_bytes;
 
-            for (int j = 0; j < head_dim; j++) {
-                float v_val = fp16_to_fp32(v_cache_head[j]);
-                out_head[j] += prob * v_val;
-            }
+            add_v_scaled(out_head, v_head_ptr, prob, head_dim, ctype);
         }
 
         if (is_qwen) {
@@ -273,6 +389,6 @@ void attention_forward(
         scratch->ssm_qkv
     );
 
-    /* Step 5: Residual Addition */
+    /* Step 5: Residual Connection */
     add_residual(hidden_state, hidden_state, scratch->hidden_state, hidden_dim);
 }

@@ -79,7 +79,8 @@ typedef struct {
     uint64_t ssm_conv_bytes;     // ssm conv history size
     int32_t  next_tok;           // next token ID
     uint32_t checksum;           // 0x5157454E
-    int32_t  reserved[6];
+    int32_t  cache_type;         // 0 = F16, 1 = Q8_0, 2 = Q4_0
+    int32_t  reserved[5];
 } diskllm_state_header;
 
 static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwen_model_config *cfg, int li,
@@ -336,6 +337,7 @@ static void print_usage(const char *prog) {
     printf("  --system <text>             System prompt text (for --chat)\n");
     printf("  --prompt-ids <id1,id2,...>  Input prompt token IDs\n");
     printf("  --prompt-ids-file <file>    File containing prompt token IDs\n");
+    printf("  --cache-type <f16|q8_0|q4_0> KV cache quantization format (default: f16)\n");
     printf("  --save-state <file>         File path to save execution state\n");
     printf("  --load-state <file>         File path to load execution state from\n");
     printf("  --state-info <file>         Print header information of a state file\n");
@@ -373,6 +375,9 @@ static int print_state_info(const char *state_file) {
     }
     fclose(f);
 
+    const char *ctnames[] = {"F16", "Q8_0", "Q4_0"};
+    const char *cname = (hdr.cache_type >= 0 && hdr.cache_type <= 2) ? ctnames[hdr.cache_type] : "Unknown";
+
     printf("State File Header Information for: %s\n", state_file);
     printf("  Magic          : %.4s\n", hdr.magic);
     printf("  Version        : %u\n", hdr.version);
@@ -380,6 +385,7 @@ static int print_state_info(const char *state_file) {
     printf("  Prompt Length  : %d\n", hdr.prompt_len);
     printf("  Context Size   : %d\n", hdr.context_size);
     printf("  Hidden Dim     : %d\n", hdr.hidden_dim);
+    printf("  Cache Type     : %s (%d)\n", cname, hdr.cache_type);
     printf("  KV Cache Size  : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.kv_cache_bytes / (1024*1024), hdr.kv_cache_bytes);
     printf("  SSM State Size : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.ssm_state_bytes / (1024*1024), hdr.ssm_state_bytes);
     printf("  SSM Conv Size  : %.2f MB (%" PRIu64 " bytes)\n", (double)hdr.ssm_conv_bytes / (1024*1024), hdr.ssm_conv_bytes);
@@ -503,6 +509,7 @@ int main(int argc, char **argv) {
     char    *load_state_path     = NULL;
     char    *state_info_file     = NULL;
     char    *prefill_mode_str    = "stream";
+    char    *cache_type_str      = "f16";
     int      num_threads         = 0;
     int      max_tokens          = 128;
     int      context_size        = 4096;
@@ -548,6 +555,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--system"))           { NEXTARG(system_text); }
         else if (!strcmp(argv[i],"--prompt-ids"))        { NEXTARG(prompt_ids_str); }
         else if (!strcmp(argv[i],"--prompt-ids-file"))   { NEXTARG(prompt_ids_file); }
+        else if (!strcmp(argv[i],"--cache-type"))       { NEXTARG(cache_type_str); }
         else if (!strcmp(argv[i],"--save-state"))       { NEXTARG(save_state_path); }
         else if (!strcmp(argv[i],"--load-state"))       { NEXTARG(load_state_path); }
         else if (!strcmp(argv[i],"--state-info"))       { NEXTARG(state_info_file); }
@@ -907,6 +915,13 @@ int main(int argc, char **argv) {
     double t_prefill_start = get_time_ms();
     double t_prefill_end   = t_prefill_start;
 
+    cache_type_t kv_cache_type = CACHE_TYPE_F16;
+    if (!strcmp(cache_type_str, "q8_0") || !strcmp(cache_type_str, "q8")) {
+        kv_cache_type = CACHE_TYPE_Q8_0;
+    } else if (!strcmp(cache_type_str, "q4_0") || !strcmp(cache_type_str, "q4")) {
+        kv_cache_type = CACHE_TYPE_Q4_0;
+    }
+
     if (load_state_path) {
         FILE *sf = fopen(load_state_path, "rb");
         if (!sf) {
@@ -924,12 +939,18 @@ int main(int argc, char **argv) {
             fclose(sf);
             return 1;
         }
+        if (hdr.cache_type >= 0 && hdr.cache_type <= 2) {
+            if (hdr.cache_type != (int32_t)kv_cache_type && !quiet) {
+                fprintf(stderr, "[WARNING] State file cache_type (%d) differs from CLI cache_type (%d). Using state file cache_type format.\n", hdr.cache_type, (int)kv_cache_type);
+            }
+            kv_cache_type = (cache_type_t)hdr.cache_type;
+        }
         int saved_pos = hdr.pos > 0 ? hdr.pos : hdr.prompt_len;
         prompt_len = saved_pos;
         if (context_size < prompt_len + max_tokens + 64)
             context_size = prompt_len + max_tokens + 64;
 
-        state = allocate_model_state(cfg, context_size);
+        state = allocate_model_state_ex(cfg, context_size, kv_cache_type);
         buf_a = malloc(300ULL * 1024 * 1024);
         buf_b = malloc(300ULL * 1024 * 1024);
         bufs[0] = buf_a; bufs[1] = buf_b;
@@ -952,7 +973,12 @@ int main(int argc, char **argv) {
         printf("[INFO] Loaded state from %s (%.2f MB, pos=%d, next_tok=%d) in %.2f ms\n",
                load_state_path, loaded_mb, prompt_len, next_tok, t_prefill_end - t_prefill_start);
     } else {
-        state    = allocate_model_state(cfg, context_size);
+        state    = allocate_model_state_ex(cfg, context_size, kv_cache_type);
+        if (!quiet) {
+            const char *cnames[] = {"FP16", "Q8_0", "Q4_0"};
+            fprintf(stderr, "[INFO] KV Cache format: %s (%.2f MB allocated for %d context tokens)\n",
+                    cnames[state->cache_type], (double)state->kv_cache_size / (1024*1024), state->context_length);
+        }
         buf_a    = malloc(300ULL * 1024 * 1024);
         buf_b    = malloc(300ULL * 1024 * 1024);
         hidden_states = malloc((size_t)prompt_len * cfg->hidden_dim * sizeof(float));
@@ -1374,7 +1400,8 @@ int main(int argc, char **argv) {
                 .ssm_state_bytes = state->ssm_states_size,
                 .ssm_conv_bytes = state->ssm_conv_histories_size,
                 .next_tok = next_tok,
-                .checksum = 0x5157454E
+                .checksum = 0x5157454E,
+                .cache_type = (int32_t)state->cache_type
             };
             fwrite(&hdr, sizeof(hdr), 1, sf);
             fwrite(state->kv_cache, 1, state->kv_cache_size, sf);

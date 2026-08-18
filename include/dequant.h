@@ -40,6 +40,12 @@ typedef struct {
     int8_t qs[QK8_0]; // 8-bit quants
 } block_q8_0;
 
+// 4-bit quantization block (standard 0-type)
+typedef struct {
+    uint16_t d;       // delta scale (FP16 representation)
+    uint8_t qs[16];   // 4-bit quants (16 bytes = 32 values)
+} block_q4_0;
+
 // Helper to convert float bits to float value
 static inline float fp32_from_bits(uint32_t w) {
     union {

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <inttypes.h>
 
-model_state *allocate_model_state(const qwen_model_config *cfg, int context_length) {
+model_state *allocate_model_state_ex(const qwen_model_config *cfg, int context_length, cache_type_t cache_type) {
     if (context_length <= 0 || !cfg) {
         fprintf(stderr, "Error: Invalid context length %d or null config\n", context_length);
         return NULL;
@@ -19,6 +19,7 @@ model_state *allocate_model_state(const qwen_model_config *cfg, int context_leng
     }
 
     state->context_length = context_length;
+    state->cache_type = cache_type;
     state->kv_dim = cfg->num_kv_heads * cfg->key_length;
     state->ssm_inner_size = cfg->ssm_inner_size;
     state->ssm_state_size = cfg->ssm_state_size;
@@ -40,9 +41,20 @@ model_state *allocate_model_state(const qwen_model_config *cfg, int context_leng
         }
     }
 
-    // 1. Allocate KV cache
+    // 1. Calculate KV cache token size and allocate KV cache
     if (attn_count > 0 && state->kv_dim > 0) {
-        state->kv_cache_size = (size_t)attn_count * (size_t)context_length * 2ULL * (size_t)state->kv_dim * sizeof(uint16_t);
+        if (cache_type == CACHE_TYPE_Q8_0) {
+            size_t nb = ((size_t)state->kv_dim + 31) / 32;
+            state->kv_token_bytes = nb * 34 * 2;
+        } else if (cache_type == CACHE_TYPE_Q4_0) {
+            size_t nb = ((size_t)state->kv_dim + 31) / 32;
+            state->kv_token_bytes = nb * 18 * 2;
+        } else {
+            state->cache_type = CACHE_TYPE_F16;
+            state->kv_token_bytes = (size_t)state->kv_dim * 2 * sizeof(uint16_t);
+        }
+
+        state->kv_cache_size = (size_t)attn_count * (size_t)context_length * state->kv_token_bytes;
         int ret = posix_memalign((void **)&state->kv_cache, 64, state->kv_cache_size);
         if (ret != 0 || !state->kv_cache) {
             fprintf(stderr, "Error: Failed to allocate KV cache of size %" PRIu64 " bytes.\n", (uint64_t)state->kv_cache_size);
@@ -79,6 +91,10 @@ model_state *allocate_model_state(const qwen_model_config *cfg, int context_leng
     }
 
     return state;
+}
+
+model_state *allocate_model_state(const qwen_model_config *cfg, int context_length) {
+    return allocate_model_state_ex(cfg, context_length, CACHE_TYPE_F16);
 }
 
 void free_model_state(model_state *state) {
