@@ -743,8 +743,17 @@ int main(int argc, char **argv) {
     scratch_buffers *scratch = allocate_scratch_buffers(cfg);
     if (!scratch) { fprintf(stderr, "Allocation failure for scratch buffers.\n"); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
 
+    io_mode_t io_mode = IO_MODE_PREAD;
+    if (!strcmp(io_mode_str, "mmap")) {
+        io_mode = IO_MODE_MMAP;
+    } else if (!strcmp(io_mode_str, "direct")) {
+        io_mode = IO_MODE_DIRECT;
+    } else if (!strcmp(io_mode_str, "iouring") || !strcmp(io_mode_str, "io_uring")) {
+        io_mode = IO_MODE_IOURING;
+    }
+
     /* ── Streaming context ── */
-    stream_context *sctx = init_stream_context(model_path, scratch->stream_buffer, scratch->stream_buffer_size);
+    stream_context *sctx = init_stream_context_ex(model_path, scratch->stream_buffer, scratch->stream_buffer_size, io_mode);
     if (!sctx) { fprintf(stderr,"Failed to init stream context.\n"); free_scratch_buffers(scratch); free_qwen_model_config(cfg); free_tensor_catalog(catalog); return 1; }
     int fd = sctx->fd;
 

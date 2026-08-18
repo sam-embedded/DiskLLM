@@ -28,7 +28,7 @@ tensor_map: tools/tensor_map.c
 probe_model: tools/probe_model.c src/state.c src/scratch.c
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
-bench_stream: tools/bench_stream.c src/state.c src/scratch.c src/stream.c
+bench_stream: tools/bench_stream.c src/state.c src/scratch.c src/stream.c src/tensor_catalog.c src/layer_map.c
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 test_dequant: tools/test_dequant.c src/dequant.c
