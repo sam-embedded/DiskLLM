@@ -134,7 +134,15 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwe
         LOAD(blk->u.ssm.ssm_out_w,            "blk.%d.ssm_out.weight",   blk->u.ssm.ssm_out_w_type);
         LOAD(blk->u.ssm.attn_gate_w,          "blk.%d.attn_gate.weight", blk->u.ssm.attn_gate_w_type);
     }
-    LOAD_NORM(blk->post_attn_norm_w,          "blk.%d.post_attention_norm.weight");
+    snprintf(nm, sizeof(nm), "blk.%d.post_attention_norm.weight", li);
+    const tensor_info *_ti_post = find_tensor(cat, nm);
+    if (!_ti_post) {
+        snprintf(nm, sizeof(nm), "blk.%d.ffn_norm.weight", li);
+        _ti_post = find_tensor(cat, nm);
+    }
+    if (!_ti_post) { fprintf(stderr, "[ERROR] Missing layer norm tensor: blk.%d.(post_attention_norm|ffn_norm).weight\n", li); return -1; }
+    if (load_tensor_to_buf(fd, _ti_post, p, ctr) != 0) return -1;
+    blk->post_attn_norm_w = (const float *)p; p += _ti_post->byte_size;
     LOAD(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
     LOAD(blk->ffn_up_w,   "blk.%d.ffn_up.weight",   blk->ffn_up_w_type);
     LOAD(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
@@ -193,7 +201,14 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, const qwen_m
         LOAD_MMAP(blk->u.ssm.ssm_out_w,            "blk.%d.ssm_out.weight",   blk->u.ssm.ssm_out_w_type);
         LOAD_MMAP(blk->u.ssm.attn_gate_w,          "blk.%d.attn_gate.weight", blk->u.ssm.attn_gate_w_type);
     }
-    LOAD_NORM_MMAP(blk->post_attn_norm_w,          "blk.%d.post_attention_norm.weight");
+    snprintf(nm, sizeof(nm), "blk.%d.post_attention_norm.weight", li);
+    const tensor_info *_ti_post_m = find_tensor(cat, nm);
+    if (!_ti_post_m) {
+        snprintf(nm, sizeof(nm), "blk.%d.ffn_norm.weight", li);
+        _ti_post_m = find_tensor(cat, nm);
+    }
+    if (!_ti_post_m) { fprintf(stderr, "[ERROR] Missing layer norm tensor: blk.%d.(post_attention_norm|ffn_norm).weight\n", li); return -1; }
+    blk->post_attn_norm_w = (const float *)(mmap_base + _ti_post_m->absolute_offset);
     LOAD_MMAP(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
     LOAD_MMAP(blk->ffn_up_w,   "blk.%d.ffn_up.weight",   blk->ffn_up_w_type);
     LOAD_MMAP(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
@@ -401,7 +416,9 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat, const qwen
     printf("\n--- Architecture Feature Inspection ---\n");
     printf("  Model Type           : %s\n",
            cfg->model_type == MODEL_TYPE_QWEN_HYBRID ? "MODEL_TYPE_QWEN_HYBRID" :
-           cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY ? "MODEL_TYPE_QWEN_ATTENTION_ONLY" : "MODEL_TYPE_UNSUPPORTED");
+           cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY ? "MODEL_TYPE_QWEN_ATTENTION_ONLY" :
+           cfg->model_type == MODEL_TYPE_LLAMA ? "MODEL_TYPE_LLAMA" :
+           cfg->model_type == MODEL_TYPE_MISTRAL ? "MODEL_TYPE_MISTRAL" : "MODEL_TYPE_UNSUPPORTED");
     printf("  Detected Block Count : %d (indices 0..%d)\n", cfg->block_count, cfg->block_count - 1);
     printf("  SSM Layers Count     : %d\n", cfg->num_ssm_layers);
     printf("  Attention Layers Count: %d\n", cfg->num_attn_layers);
@@ -451,6 +468,11 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat, const qwen
             for (size_t k = 0; k < sizeof(expected_attn)/sizeof(expected_attn[0]); k++) {
                 snprintf(nm, sizeof(nm), expected_attn[k], b);
                 if (!find_tensor(cat, nm)) {
+                    if (!strcmp(expected_attn[k], "blk.%d.post_attention_norm.weight")) {
+                        char alt_nm[256];
+                        snprintf(alt_nm, sizeof(alt_nm), "blk.%d.ffn_norm.weight", b);
+                        if (find_tensor(cat, alt_nm)) continue;
+                    }
                     printf("  [MISSING] Block %d: %s\n", b, nm);
                     missing_block_tensors++;
                 }

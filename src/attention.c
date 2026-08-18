@@ -114,7 +114,8 @@ void attention_forward(
     double freq_base   = cfg ? (double)cfg->rope_freq_base : 10000000.0;
     int rope_dim       = cfg ? cfg->rope_dim : 64;
 
-    int q_dim_per_head = head_dim * 2;
+    int is_qwen = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
+    int q_dim_per_head = is_qwen ? (head_dim * 2) : head_dim;
     int q_total_dim    = num_attn_heads * q_dim_per_head;
     int k_total_dim    = num_kv_heads * head_dim;
     int v_total_dim    = num_kv_heads * head_dim;
@@ -252,10 +253,12 @@ void attention_forward(
             }
         }
 
-        const float *gate_head = q_head + head_dim;
-        for (int j = 0; j < head_dim; j++) {
-            float sig_gate = 1.0f / (1.0f + expf(-gate_head[j]));
-            out_head[j] *= sig_gate;
+        if (is_qwen) {
+            const float *gate_head = q_head + head_dim;
+            for (int j = 0; j < head_dim; j++) {
+                float sig_gate = 1.0f / (1.0f + expf(-gate_head[j]));
+                out_head[j] *= sig_gate;
+            }
         }
     }
 

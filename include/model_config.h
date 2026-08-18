@@ -9,7 +9,9 @@
 typedef enum {
     MODEL_TYPE_QWEN_HYBRID = 0,
     MODEL_TYPE_QWEN_ATTENTION_ONLY = 1,
-    MODEL_TYPE_UNSUPPORTED = 2
+    MODEL_TYPE_LLAMA = 2,
+    MODEL_TYPE_MISTRAL = 3,
+    MODEL_TYPE_UNSUPPORTED = 4
 } model_type_enum;
 
 typedef enum {

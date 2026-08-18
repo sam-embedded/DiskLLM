@@ -32,5 +32,11 @@ layer_type classify_layer_type(const tensor_catalog *cat, int block_idx) {
         return LAYER_TYPE_ATTENTION;
     }
 
+    /* 4. Check for standard attn_norm or ffn_norm */
+    snprintf(nm, sizeof(nm), "blk.%d.attn_norm.weight", block_idx);
+    if (find_tensor(cat, nm) != NULL) {
+        return LAYER_TYPE_ATTENTION;
+    }
+
     return LAYER_TYPE_UNKNOWN;
 }
