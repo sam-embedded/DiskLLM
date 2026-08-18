@@ -693,8 +693,14 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     GET_U32(cfg->ffn_dim, "feed_forward_length", 17408);
     GET_U32(cfg->num_attn_heads, "attention.head_count", 24);
     GET_U32(cfg->num_kv_heads, "attention.head_count_kv", 4);
-    GET_U32(cfg->key_length, "attention.key_length", 256);
-    GET_U32(cfg->value_length, "attention.value_length", 256);
+    GET_U32(cfg->key_length, "attention.key_length", 0);
+    if (cfg->key_length <= 0 && cfg->num_attn_heads > 0 && cfg->hidden_dim > 0) {
+        cfg->key_length = cfg->hidden_dim / cfg->num_attn_heads;
+    }
+    GET_U32(cfg->value_length, "attention.value_length", 0);
+    if (cfg->value_length <= 0) {
+        cfg->value_length = cfg->key_length;
+    }
     cfg->head_dim = cfg->key_length;
 
     GET_FLT(cfg->rope_freq_base, "rope.freq_base", 10000000.0f);

@@ -666,6 +666,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (!quiet) {
+        fprintf(stderr, "[INFO] Model arch: %s, type: %d, blocks: %d, hidden: %d, heads: %d/%d, key_len: %d, attn_layers: %d\n",
+                cfg->architecture, cfg->model_type, cfg->block_count, cfg->hidden_dim, cfg->num_attn_heads, cfg->num_kv_heads, cfg->key_length, cfg->num_attn_layers);
+    }
+
     if (print_missing_tensors_flag) {
         run_missing_tensor_diagnostics(catalog, cfg);
         free_qwen_model_config(cfg);
