@@ -726,6 +726,7 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     GET_U32(cfg->ssm_time_step_rank, "ssm.time_step_rank", 48);
     GET_U32(cfg->ssm_inner_size, "ssm.inner_size", 6144);
     GET_U32(cfg->full_attn_interval, "full_attention_interval", 4);
+    GET_FLT(cfg->final_logit_softcapping, "final_logit_softcapping", 0.0f);
 
     #undef GET_U32
     #undef GET_FLT
@@ -819,13 +820,15 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     } else if (!strcasecmp(cfg->architecture, "mistral")) {
         cfg->model_type = MODEL_TYPE_MISTRAL;
     } else if (!strcasecmp(cfg->architecture, "gemma") || !strcasecmp(cfg->architecture, "gemma2") || !strcasecmp(cfg->architecture, "gemma4")) {
-        cfg->model_type = MODEL_TYPE_LLAMA;
+        cfg->model_type = MODEL_TYPE_GEMMA;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-hybrid")) {
         cfg->model_type = MODEL_TYPE_QWEN_HYBRID;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-attention")) {
         cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
-    } else if (arch_flag_str && (!strcmp(arch_flag_str, "llama") || !strcmp(arch_flag_str, "gemma") || !strcmp(arch_flag_str, "gemma4"))) {
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "llama")) {
         cfg->model_type = MODEL_TYPE_LLAMA;
+    } else if (arch_flag_str && (!strcmp(arch_flag_str, "gemma") || !strcmp(arch_flag_str, "gemma4"))) {
+        cfg->model_type = MODEL_TYPE_GEMMA;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "mistral")) {
         cfg->model_type = MODEL_TYPE_MISTRAL;
     } else {

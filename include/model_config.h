@@ -11,7 +11,8 @@ typedef enum {
     MODEL_TYPE_QWEN_ATTENTION_ONLY = 1,
     MODEL_TYPE_LLAMA = 2,
     MODEL_TYPE_MISTRAL = 3,
-    MODEL_TYPE_UNSUPPORTED = 4
+    MODEL_TYPE_GEMMA = 4,
+    MODEL_TYPE_UNSUPPORTED = 5
 } model_type_enum;
 
 typedef enum {
@@ -66,6 +67,7 @@ typedef struct qwen_model_config {
 
     uint32_t eos_token_id;
     uint32_t bos_token_id;
+    float final_logit_softcapping;
 } qwen_model_config;
 
 qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_catalog *cat, const char *arch_flag_str);

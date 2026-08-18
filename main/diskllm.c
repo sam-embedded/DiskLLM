@@ -1013,6 +1013,11 @@ int main(int argc, char **argv) {
             bytes_read += embed_row_bytes;
             dequantize_row(row_buf, hidden_states + pos * cfg->hidden_dim, cfg->hidden_dim, ti_emb->type);
             free(row_buf);
+            if (cfg->model_type == MODEL_TYPE_GEMMA) {
+                float emb_scale = sqrtf((float)cfg->hidden_dim);
+                float *h_ptr = hidden_states + pos * cfg->hidden_dim;
+                for (int j = 0; j < cfg->hidden_dim; j++) h_ptr[j] *= emb_scale;
+            }
         }
 
         /* Layer loop with double-buffered prefetch */
@@ -1094,6 +1099,13 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (cfg->final_logit_softcapping > 0.0f) {
+            float sc = cfg->final_logit_softcapping;
+            for (int v = 0; v < cfg->vocab_size; v++) {
+                logits[v] = sc * tanhf(logits[v] / sc);
+            }
+        }
+
         if (repeat_penalty > 1.0f && prompt_tokens && prompt_len > 0) {
             sampler_apply_repetition_penalty(logits, cfg->vocab_size, prompt_tokens, prompt_len, repeat_penalty);
         }
@@ -1163,6 +1175,10 @@ int main(int argc, char **argv) {
             bytes_read += embed_row_bytes;
             dequantize_row(row_buf, hidden_single, cfg->hidden_dim, ti_emb->type);
             free(row_buf);
+            if (cfg->model_type == MODEL_TYPE_GEMMA) {
+                float emb_scale = sqrtf((float)cfg->hidden_dim);
+                for (int j = 0; j < cfg->hidden_dim; j++) hidden_single[j] *= emb_scale;
+            }
         }
 
         uint64_t phys_io_start = get_proc_self_io_read_bytes();
@@ -1295,6 +1311,13 @@ int main(int argc, char **argv) {
                 tok_out_cp_ms += (t3 - t2);
 
                 rows_done += r;
+            }
+        }
+
+        if (cfg->final_logit_softcapping > 0.0f) {
+            float sc = cfg->final_logit_softcapping;
+            for (int v = 0; v < cfg->vocab_size; v++) {
+                logits[v] = sc * tanhf(logits[v] / sc);
             }
         }
 
