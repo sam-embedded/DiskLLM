@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+static inline int max_int(int a, int b) {
+    return a > b ? a : b;
+}
+
 scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     if (!cfg) {
         qwen_model_config dummy = {
@@ -12,6 +16,7 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
             .num_attn_heads = 24, .key_length = 256,
             .num_kv_heads = 4, .ssm_inner_size = 6144,
             .ssm_group_count = 16, .ssm_state_size = 128,
+            .ssm_time_step_rank = 48,
             .vocab_size = 248320
         };
         return allocate_scratch_buffers(&dummy);
@@ -37,13 +42,28 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     int vocab_size = cfg->vocab_size > 0 ? cfg->vocab_size : 248320;
 
     int q_total_dim = cfg->num_attn_heads * cfg->key_length * 2;
-    if (q_total_dim < 12288) q_total_dim = 12288;
-
     int kv_total_dim = cfg->num_kv_heads * cfg->key_length;
-    if (kv_total_dim < 1024) kv_total_dim = 1024;
+    int attn_out_dim = cfg->num_attn_heads * cfg->key_length;
 
-    int ssm_conv_dim = cfg->ssm_inner_size + 2 * (cfg->ssm_group_count * cfg->ssm_state_size);
-    if (ssm_conv_dim < 10240) ssm_conv_dim = 10240;
+    int ssm_group_count = cfg->ssm_group_count > 0 ? cfg->ssm_group_count : 16;
+    int ssm_state_size = cfg->ssm_state_size > 0 ? cfg->ssm_state_size : 128;
+    int ssm_rank = cfg->ssm_time_step_rank > 0 ? cfg->ssm_time_step_rank : 48;
+    int ssm_inner = cfg->ssm_inner_size > 0 ? cfg->ssm_inner_size : 6144;
+    int ssm_conv_dim = ssm_inner + 2 * (ssm_group_count * ssm_state_size);
+
+    // Compute maximum size required for each activation buffer across Attention and SSM layers
+    int ffn_gate_alloc_dim = max_int(ffn_dim, ssm_conv_dim);
+    ffn_gate_alloc_dim = max_int(ffn_gate_alloc_dim, ssm_inner + ssm_rank * ssm_state_size);
+    ffn_gate_alloc_dim = max_int(ffn_gate_alloc_dim, attn_out_dim);
+
+    int ffn_up_alloc_dim = max_int(ffn_dim, ssm_conv_dim);
+    ffn_up_alloc_dim = max_int(ffn_up_alloc_dim, 8192); // context length headroom
+
+    int attn_q_alloc_dim = max_int(q_total_dim, ssm_inner);
+    int attn_kv_alloc_dim = max_int(kv_total_dim, 2 * ssm_rank);
+
+    int ssm_qkv_alloc_dim = max_int(ssm_conv_dim, ffn_dim);
+    ssm_qkv_alloc_dim = max_int(ssm_qkv_alloc_dim, vocab_size);
 
     #define ALLOC_ALIGNED_FLOAT(ptr, count) do { \
         ret = posix_memalign((void **)&scratch->ptr, 64, (size_t)(count) * sizeof(float)); \
@@ -56,11 +76,11 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     } while(0)
 
     ALLOC_ALIGNED_FLOAT(hidden_state, hidden_dim);
-    ALLOC_ALIGNED_FLOAT(ffn_gate, ffn_dim);
-    ALLOC_ALIGNED_FLOAT(ffn_up, ffn_dim);
-    ALLOC_ALIGNED_FLOAT(attn_q, q_total_dim);
-    ALLOC_ALIGNED_FLOAT(attn_kv, kv_total_dim);
-    ALLOC_ALIGNED_FLOAT(ssm_qkv, ssm_conv_dim);
+    ALLOC_ALIGNED_FLOAT(ffn_gate, ffn_gate_alloc_dim);
+    ALLOC_ALIGNED_FLOAT(ffn_up, ffn_up_alloc_dim);
+    ALLOC_ALIGNED_FLOAT(attn_q, attn_q_alloc_dim);
+    ALLOC_ALIGNED_FLOAT(attn_kv, attn_kv_alloc_dim);
+    ALLOC_ALIGNED_FLOAT(ssm_qkv, ssm_qkv_alloc_dim);
     ALLOC_ALIGNED_FLOAT(logits, vocab_size);
 
     #undef ALLOC_ALIGNED_FLOAT
