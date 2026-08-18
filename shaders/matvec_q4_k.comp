@@ -1,0 +1,98 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint K; // in_features
+    uint N; // out_features
+} pc;
+
+layout(std430, binding = 0) readonly buffer InputX {
+    float x[];
+};
+
+layout(std430, binding = 1) readonly buffer WeightsW {
+    uint w[]; // Raw C bytes
+};
+
+layout(std430, binding = 2) writeonly buffer OutputY {
+    float y[];
+};
+
+uint get_byte(uint byte_offset) {
+    uint word_idx = byte_offset >> 2;
+    uint byte_in_word = byte_offset & 3u;
+    return (w[word_idx] >> (byte_in_word * 8u)) & 0xFFu;
+}
+
+uint get_uint16(uint byte_offset) {
+    uint b0 = get_byte(byte_offset);
+    uint b1 = get_byte(byte_offset + 1u);
+    return b0 | (b1 << 8u);
+}
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+void get_scale_min_k4(uint j, uint scales_offset, out float sc, out float m, float d, float min_val) {
+    uint d_raw, m_raw;
+    if (j < 4u) {
+        d_raw = get_byte(scales_offset + j) & 63u;
+        m_raw = get_byte(scales_offset + j + 4u) & 63u;
+    } else {
+        uint q_j4 = get_byte(scales_offset + j + 4u);
+        uint q_jm4 = get_byte(scales_offset + j - 4u);
+        uint q_j0 = get_byte(scales_offset + j);
+        d_raw = (q_j4 & 15u) | ((q_jm4 >> 6) << 4u);
+        m_raw = (q_j4 >> 4u) | ((q_j0 >> 6) << 4u);
+    }
+    sc = d * float(d_raw);
+    m = min_val * float(m_raw);
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.N) return;
+
+    uint num_blocks_per_row = pc.K / 256u;
+    uint block_row_offset = row * num_blocks_per_row * 144u;
+
+    float sum = 0.0;
+    for (uint b = 0u; b < num_blocks_per_row; b++) {
+        uint b_offset = block_row_offset + b * 144u;
+        float d = fp16_to_fp32(get_uint16(b_offset));
+        float min_val = fp16_to_fp32(get_uint16(b_offset + 2u));
+        uint scales_offset = b_offset + 4u;
+        uint qs_offset = b_offset + 16u;
+        uint x_offset = b * 256u;
+
+        uint is = 0u;
+        uint q_cur = qs_offset;
+
+        for (uint j = 0u; j < 256u; j += 64u) {
+            float d1, m1, d2, m2;
+            get_scale_min_k4(is + 0u, scales_offset, d1, m1, d, min_val);
+            get_scale_min_k4(is + 1u, scales_offset, d2, m2, d, min_val);
+
+            // First 32 elements in 64-chunk (low 4 bits of 32 bytes)
+            for (uint l = 0u; l < 32u; l++) {
+                uint q8 = get_byte(q_cur + l);
+                float val = float(q8 & 15u) * d1 - m1;
+                sum += val * x[x_offset + j + l];
+            }
+
+            // Second 32 elements in 64-chunk (high 4 bits of the same 32 bytes)
+            for (uint l = 0u; l < 32u; l++) {
+                uint q8 = get_byte(q_cur + l);
+                float val = float(q8 >> 4u) * d2 - m2;
+                sum += val * x[x_offset + j + 32u + l];
+            }
+
+            q_cur += 32u;
+            is += 2u;
+        }
+    }
+
+    y[row] = sum;
+}

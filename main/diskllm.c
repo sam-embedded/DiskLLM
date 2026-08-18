@@ -14,6 +14,7 @@
 #include "tokenizer.h"
 #include "model_config.h"
 #include "speculative.h"
+#include "vulkan_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -357,6 +358,7 @@ static void print_usage(const char *prog) {
     printf("  --log-io-per-token          Log I/O wait vs compute breakdown per generated token\n");
     printf("  --profile-decode            Print detailed decode profiling breakdown\n");
     printf("  --greedy                    Shortcut for --temp 0.0\n");
+    printf("  --gpu                       Enable Vulkan GPU acceleration for compute kernels\n");
     printf("  --quiet                     Suppress progress messages\n");
     printf("  --help, -h                  Show this help message\n");
 }
@@ -532,6 +534,7 @@ int main(int argc, char **argv) {
     char    *lookup_ids_arg      = NULL;
     char    *search_token_q      = NULL;
     int      print_missing_tensors_flag = 0;
+    int      use_gpu             = 0;
     int      extra_stops[32]; int extra_stop_cnt = 0;
 
     sampler_config scfg = {
@@ -551,6 +554,7 @@ int main(int argc, char **argv) {
         if      (!strcmp(argv[i],"--model"))            { NEXTARG(model_path); }
         else if (!strcmp(argv[i],"--arch"))             { NEXTARG(arch_str); }
         else if (!strcmp(argv[i],"--speculate"))        { NEXTINT(speculate_k); }
+        else if (!strcmp(argv[i],"--gpu"))              { use_gpu = 1; }
         else if (!strcmp(argv[i],"--prompt"))           { NEXTARG(prompt_text); }
         else if (!strcmp(argv[i],"--system"))           { NEXTARG(system_text); }
         else if (!strcmp(argv[i],"--prompt-ids"))        { NEXTARG(prompt_ids_str); }
@@ -608,6 +612,13 @@ int main(int argc, char **argv) {
     (void)logits_summary;
     (void)log_io;
     (void)show_special_tokens;
+
+    if (use_gpu) {
+        g_vulkan_ctx = vulkan_backend_init();
+        if (!g_vulkan_ctx && !quiet) {
+            fprintf(stderr, "[WARNING] Vulkan GPU backend initialization failed. Falling back to CPU.\n");
+        }
+    }
 
     if (!model_path) {
         fprintf(stderr, "Error: --model is required.\n");
@@ -1460,6 +1471,10 @@ int main(int argc, char **argv) {
     }
 
     /* ─── Cleanup ─────────────────────────────────────────────────────────── */
+    if (g_vulkan_ctx) {
+        vulkan_backend_free(g_vulkan_ctx);
+        g_vulkan_ctx = NULL;
+    }
     if (g_tok) tokenizer_free(g_tok);
     sampler_free(smp);
     free(gen_tokens); free(hidden_states); free(hidden_single); free(logits);

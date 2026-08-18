@@ -1,5 +1,6 @@
 #include "kernels.h"
 #include "dequant.h"
+#include "vulkan_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -390,6 +391,13 @@ void matvec(
     float * restrict dequant_buf
 ) {
     (void)dequant_buf;
+
+    if (g_vulkan_ctx) {
+        if (vulkan_matvec(g_vulkan_ctx, out, w, x, in_features, out_features, type) == 0) {
+            return;
+        }
+    }
+
     int num_threads = g_num_threads;
 
     if (num_threads <= 1 || out_features < 64) {

@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint K; // in_features
+    uint N; // out_features
+} pc;
+
+layout(std430, binding = 0) readonly buffer InputX {
+    float x[];
+};
+
+layout(std430, binding = 1) readonly buffer WeightsW {
+    uint w[]; // Raw C bytes
+};
+
+layout(std430, binding = 2) writeonly buffer OutputY {
+    float y[];
+};
+
+uint get_byte(uint byte_offset) {
+    uint word_idx = byte_offset >> 2;
+    uint byte_in_word = byte_offset & 3u;
+    return (w[word_idx] >> (byte_in_word * 8u)) & 0xFFu;
+}
+
+int get_int8(uint byte_offset) {
+    uint b = get_byte(byte_offset);
+    return int(int(b << 24) >> 24);
+}
+
+uint get_uint16(uint byte_offset) {
+    uint b0 = get_byte(byte_offset);
+    uint b1 = get_byte(byte_offset + 1u);
+    return b0 | (b1 << 8u);
+}
+
+float fp16_to_fp32(uint h) {
+    return unpackHalf2x16(h).x;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.N) return;
+
+    uint num_blocks_per_row = pc.K / 32u;
+    uint block_row_offset = row * num_blocks_per_row * 34u;
+
+    float sum = 0.0;
+    for (uint b = 0u; b < num_blocks_per_row; b++) {
+        uint b_offset = block_row_offset + b * 34u;
+        uint d_bits = get_uint16(b_offset);
+        float d = fp16_to_fp32(d_bits);
+        uint x_offset = b * 32u;
+
+        for (uint j = 0u; j < 32u; j++) {
+            int q_val = get_int8(b_offset + 2u + j);
+            sum += float(q_val) * x[x_offset + j] * d;
+        }
+    }
+
+    y[row] = sum;
+}
