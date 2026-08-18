@@ -124,6 +124,19 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwe
         LOAD_NORM_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
         LOAD(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
         LOAD(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
+
+        snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
+        const tensor_info *ti_q = find_tensor(cat, nm);
+        blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
+        const tensor_info *ti_k = find_tensor(cat, nm);
+        blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
+        const tensor_info *ti_v = find_tensor(cat, nm);
+        blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_output.weight", li);
+        const tensor_info *ti_o = find_tensor(cat, nm);
+        blk->u.attn.attn_out_dim = (ti_o && ti_o->n_dims >= 2) ? (int)ti_o->dims[0] : 0;
     } else {
         LOAD_NORM(blk->u.ssm.attn_norm_w,     "blk.%d.attn_norm.weight");
         LOAD(blk->u.ssm.attn_qkv_w,           "blk.%d.attn_qkv.weight", blk->u.ssm.attn_qkv_w_type);
@@ -191,6 +204,19 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, const qwen_m
         LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
         LOAD_MMAP(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
         LOAD_MMAP(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
+
+        snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
+        const tensor_info *ti_q = find_tensor(cat, nm);
+        blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
+        const tensor_info *ti_k = find_tensor(cat, nm);
+        blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
+        const tensor_info *ti_v = find_tensor(cat, nm);
+        blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
+        snprintf(nm, sizeof(nm), "blk.%d.attn_output.weight", li);
+        const tensor_info *ti_o = find_tensor(cat, nm);
+        blk->u.attn.attn_out_dim = (ti_o && ti_o->n_dims >= 2) ? (int)ti_o->dims[0] : 0;
     } else {
         LOAD_NORM_MMAP(blk->u.ssm.attn_norm_w,     "blk.%d.attn_norm.weight");
         LOAD_MMAP(blk->u.ssm.attn_qkv_w,           "blk.%d.attn_qkv.weight", blk->u.ssm.attn_qkv_w_type);
@@ -923,6 +949,9 @@ int main(int argc, char **argv) {
     prefetch_args pargs;
     int pth_active = 0;
 
+    float emb_scale = (cfg->model_type == MODEL_TYPE_GEMMA) ? sqrtf((float)cfg->hidden_dim) : 1.0f;
+    int add_one = (cfg->model_type == MODEL_TYPE_GEMMA) ? 1 : 0;
+
     double t_prefill_start = get_time_ms();
     double t_prefill_end   = t_prefill_start;
 
@@ -1002,8 +1031,6 @@ int main(int argc, char **argv) {
         /* ════════════════════════════════════════════════════════════════════════
            PREFILL PHASE
         ════════════════════════════════════════════════════════════════════════ */
-        if (log_rss) printf("[RSS] before prefill: %ld MB\n", read_rss_mb());
-
         /* Embedding lookups */
         for (int pos = 0; pos < prompt_len; pos++) {
             uint8_t *row_buf = malloc(embed_row_bytes);
@@ -1011,12 +1038,11 @@ int main(int argc, char **argv) {
                             ti_emb->absolute_offset + (uint64_t)prompt_tokens[pos] * embed_row_bytes)
                 < (ssize_t)embed_row_bytes) { free(row_buf); return 1; }
             bytes_read += embed_row_bytes;
-            dequantize_row(row_buf, hidden_states + pos * cfg->hidden_dim, cfg->hidden_dim, ti_emb->type);
+            float *h_vec = hidden_states + pos * cfg->hidden_dim;
+            dequantize_row(row_buf, h_vec, cfg->hidden_dim, ti_emb->type);
             free(row_buf);
-            if (cfg->model_type == MODEL_TYPE_GEMMA) {
-                float emb_scale = sqrtf((float)cfg->hidden_dim);
-                float *h_ptr = hidden_states + pos * cfg->hidden_dim;
-                for (int j = 0; j < cfg->hidden_dim; j++) h_ptr[j] *= emb_scale;
+            if (emb_scale != 1.0f) {
+                for (int i = 0; i < cfg->hidden_dim; i++) h_vec[i] *= emb_scale;
             }
         }
 
@@ -1046,12 +1072,16 @@ int main(int argc, char **argv) {
                 else
                     ssm_layer_forward(h, pos, li, &blk->u.ssm, state, scratch, cfg);
 
-                rmsnorm(scratch->hidden_state, h, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
+                rmsnorm_ext(scratch->hidden_state, h, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
                 matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
                        cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                 matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
                        cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                if (cfg->model_type == MODEL_TYPE_GEMMA) {
+                    geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                } else {
+                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                }
                 matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
                        cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
                 add_residual(h, h, scratch->hidden_state, cfg->hidden_dim);
@@ -1077,7 +1107,7 @@ int main(int argc, char **argv) {
 
         /* Final norm on last position */
         float *last_h = hidden_states + (prompt_len - 1) * cfg->hidden_dim;
-        rmsnorm(last_h, last_h, output_norm, cfg->hidden_dim, 1e-6f);
+        rmsnorm_ext(last_h, last_h, output_norm, cfg->hidden_dim, 1e-6f, add_one);
         memcpy(hidden_single, last_h, cfg->hidden_dim * sizeof(float));
 
         /* Compute initial logits */
@@ -1100,9 +1130,9 @@ int main(int argc, char **argv) {
         }
 
         if (cfg->final_logit_softcapping > 0.0f) {
-            float sc = cfg->final_logit_softcapping;
-            for (int v = 0; v < cfg->vocab_size; v++) {
-                logits[v] = sc * tanhf(logits[v] / sc);
+            float cap = cfg->final_logit_softcapping;
+            for (int i = 0; i < cfg->vocab_size; i++) {
+                logits[i] = cap * tanhf(logits[i] / cap);
             }
         }
 
@@ -1175,9 +1205,8 @@ int main(int argc, char **argv) {
             bytes_read += embed_row_bytes;
             dequantize_row(row_buf, hidden_single, cfg->hidden_dim, ti_emb->type);
             free(row_buf);
-            if (cfg->model_type == MODEL_TYPE_GEMMA) {
-                float emb_scale = sqrtf((float)cfg->hidden_dim);
-                for (int j = 0; j < cfg->hidden_dim; j++) hidden_single[j] *= emb_scale;
+            if (emb_scale != 1.0f) {
+                for (int i = 0; i < cfg->hidden_dim; i++) hidden_single[i] *= emb_scale;
             }
         }
 
@@ -1204,12 +1233,16 @@ int main(int argc, char **argv) {
 
                 {
                     double t0 = get_time_ms();
-                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
+                    rmsnorm_ext(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
                     matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
                            cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                     matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
                            cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    if (cfg->model_type == MODEL_TYPE_GEMMA) {
+                        geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    } else {
+                        swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    }
                     matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
                            cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
                     add_residual(hidden_single, hidden_single, scratch->hidden_state, cfg->hidden_dim);
@@ -1257,12 +1290,16 @@ int main(int argc, char **argv) {
 
                 {
                     double t0 = get_time_ms();
-                    rmsnorm(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f);
+                    rmsnorm_ext(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
                     matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
                            cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
                     matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
                            cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
-                    swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    if (cfg->model_type == MODEL_TYPE_GEMMA) {
+                        geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    } else {
+                        swiglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
+                    }
                     matvec(scratch->hidden_state, blk->ffn_down_w, scratch->ffn_gate,
                            cfg->ffn_dim, cfg->hidden_dim, blk->ffn_down_w_type, (float*)scratch->stream_buffer);
                     add_residual(hidden_single, hidden_single, scratch->hidden_state, cfg->hidden_dim);
@@ -1283,7 +1320,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        rmsnorm(hidden_single, hidden_single, output_norm, cfg->hidden_dim, 1e-6f);
+        rmsnorm_ext(hidden_single, hidden_single, output_norm, cfg->hidden_dim, 1e-6f, add_one);
 
         /* Logits */
         if (mmap_output_weight) {
@@ -1315,9 +1352,9 @@ int main(int argc, char **argv) {
         }
 
         if (cfg->final_logit_softcapping > 0.0f) {
-            float sc = cfg->final_logit_softcapping;
-            for (int v = 0; v < cfg->vocab_size; v++) {
-                logits[v] = sc * tanhf(logits[v] / sc);
+            float cap = cfg->final_logit_softcapping;
+            for (int i = 0; i < cfg->vocab_size; i++) {
+                logits[i] = cap * tanhf(logits[i] / cap);
             }
         }
 

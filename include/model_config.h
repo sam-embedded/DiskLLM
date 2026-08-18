@@ -40,6 +40,9 @@ typedef struct qwen_model_config {
     float rope_freq_base;
     int rope_dim;
 
+    float attn_logit_softcapping;
+    float final_logit_softcapping;
+
     rope_scaling_type_enum rope_scaling_type;
     float rope_scaling_factor;
     int rope_orig_context_len;
@@ -67,7 +70,6 @@ typedef struct qwen_model_config {
 
     uint32_t eos_token_id;
     uint32_t bos_token_id;
-    float final_logit_softcapping;
 } qwen_model_config;
 
 qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_catalog *cat, const char *arch_flag_str);

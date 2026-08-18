@@ -47,6 +47,8 @@ struct tokenizer {
     size_t merge_capacity;
     int num_merges;
 
+    int is_sentencepiece;
+
     special_token_entry special_tokens[128];
     int num_special;
 };
@@ -296,6 +298,14 @@ tokenizer *tokenizer_init(const char *gguf_path) {
                     raw_merges[idx] = read_gguf_string(f);
                 }
             } else skip_val(f, val_type);
+        } else if (strcmp(key, "tokenizer.ggml.model") == 0 && val_type == 8) {
+            char *m_name = read_gguf_string(f);
+            if (m_name) {
+                if (!strcasecmp(m_name, "llama") || !strcasecmp(m_name, "gemma") || !strcasecmp(m_name, "gemma2") || !strcasecmp(m_name, "gemma4")) {
+                    tok->is_sentencepiece = 1;
+                }
+                free(m_name);
+            }
         } else {
             skip_val(f, val_type);
         }
@@ -383,6 +393,22 @@ int tokenizer_decode_token(const tokenizer *tok, int32_t token_id, int is_first_
 
     size_t out_idx = 0;
     size_t i = 0;
+
+    if (tok->is_sentencepiece) {
+        if (is_first_token && rlen >= 3 && (unsigned char)raw[0] == 0xE2 && (unsigned char)raw[1] == 0x96 && (unsigned char)raw[2] == 0x81) {
+            i += 3;
+        }
+        while (i < rlen && out_idx + 1 < max_len) {
+            if (i + 2 < rlen && (unsigned char)raw[i] == 0xE2 && (unsigned char)raw[i+1] == 0x96 && (unsigned char)raw[i+2] == 0x81) {
+                out_buf[out_idx++] = ' ';
+                i += 3;
+            } else {
+                out_buf[out_idx++] = raw[i++];
+            }
+        }
+        out_buf[out_idx] = '\0';
+        return (int)out_idx;
+    }
 
     // If first token and starts with GPT-2 space 'Ġ' (0xC4 0xA0), skip the leading Ġ
     if (is_first_token && rlen >= 2 && (unsigned char)raw[0] == 0xC4 && (unsigned char)raw[1] == 0xA0) {
@@ -509,8 +535,111 @@ static void encode_chunk(const tokenizer *tok, const char *chunk_str, size_t chu
     }
 }
 
+static void sentencepiece_encode_segment(const tokenizer *tok, const char *text, size_t text_len,
+                                         int32_t *out_tokens, int *token_cnt, int max_tokens) {
+    if (text_len == 0) return;
+
+    size_t sp_cap = text_len * 4 + 4;
+    char *sp_str = malloc(sp_cap);
+    if (!sp_str) return;
+    size_t sp_len = 0;
+
+    if (text[0] != ' ') {
+        sp_str[sp_len++] = (char)0xE2;
+        sp_str[sp_len++] = (char)0x96;
+        sp_str[sp_len++] = (char)0x81;
+    }
+
+    for (size_t i = 0; i < text_len; i++) {
+        if (text[i] == ' ') {
+            sp_str[sp_len++] = (char)0xE2;
+            sp_str[sp_len++] = (char)0x96;
+            sp_str[sp_len++] = (char)0x81;
+        } else {
+            sp_str[sp_len++] = text[i];
+        }
+    }
+    sp_str[sp_len] = '\0';
+
+    int32_t ids[2048];
+    int n_ids = 0;
+
+    size_t pos = 0;
+    while (pos < sp_len && n_ids < 2048) {
+        int matched_id = -1;
+        size_t best_len = 0;
+
+        size_t max_l = (sp_len - pos > 64) ? 64 : (sp_len - pos);
+        for (size_t l = max_l; l >= 1; l--) {
+            char sub[128];
+            memcpy(sub, sp_str + pos, l);
+            sub[l] = '\0';
+            int32_t id = vocab_table_lookup(tok, sub);
+            if (id >= 0) {
+                matched_id = id;
+                best_len = l;
+                break;
+            }
+        }
+
+        if (matched_id >= 0) {
+            ids[n_ids++] = matched_id;
+            pos += best_len;
+        } else {
+            uint8_t byte_val = (uint8_t)sp_str[pos];
+            char u_str[16];
+            snprintf(u_str, sizeof(u_str), "<0x%02X>", byte_val);
+            int32_t id = vocab_table_lookup(tok, u_str);
+            if (id >= 0) {
+                ids[n_ids++] = id;
+            }
+            pos++;
+        }
+    }
+
+    free(sp_str);
+
+    if (tok->num_merges > 0) {
+        while (n_ids >= 2) {
+            int32_t best_rank = 0x7FFFFFFF;
+            int best_idx = -1;
+            int32_t best_merged_id = -1;
+
+            for (int i = 0; i < n_ids - 1; i++) {
+                int32_t merged_id, rank;
+                if (merge_table_lookup(tok, ids[i], ids[i+1], &merged_id, &rank)) {
+                    if (rank < best_rank) {
+                        best_rank = rank;
+                        best_idx = i;
+                        best_merged_id = merged_id;
+                    }
+                }
+            }
+
+            if (best_idx == -1) break;
+
+            ids[best_idx] = best_merged_id;
+            for (int i = best_idx + 1; i < n_ids - 1; i++) {
+                ids[i] = ids[i+1];
+            }
+            n_ids--;
+        }
+    }
+
+    for (int i = 0; i < n_ids; i++) {
+        if (out_tokens && *token_cnt < max_tokens) {
+            out_tokens[*token_cnt] = ids[i];
+        }
+        (*token_cnt)++;
+    }
+}
+
 static void encode_text_segment(const tokenizer *tok, const char *text, size_t text_len,
                                 int32_t *out_tokens, int *token_cnt, int max_tokens) {
+    if (tok->is_sentencepiece) {
+        sentencepiece_encode_segment(tok, text, text_len, out_tokens, token_cnt, max_tokens);
+        return;
+    }
     size_t pos = 0;
     while (pos < text_len) {
         size_t clen = 0;

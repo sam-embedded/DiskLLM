@@ -230,19 +230,24 @@ void attention_forward(
     int num_attn_heads = cfg ? cfg->num_attn_heads : 24;
     int num_kv_heads   = cfg ? cfg->num_kv_heads : 4;
     int head_dim       = cfg ? cfg->key_length : 256;
+    if (weights && weights->q_total_dim > 0 && num_attn_heads > 0) {
+        head_dim = weights->q_total_dim / num_attn_heads;
+    }
     double freq_base   = cfg ? (double)cfg->rope_freq_base : 10000000.0;
-    int rope_dim       = cfg ? cfg->rope_dim : 64;
+    int rope_dim       = cfg ? cfg->rope_dim : head_dim;
+    if (rope_dim > head_dim) rope_dim = head_dim;
 
     int is_qwen = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
     int q_dim_per_head = is_qwen ? (head_dim * 2) : head_dim;
     int q_total_dim    = num_attn_heads * q_dim_per_head;
     int k_total_dim    = num_kv_heads * head_dim;
     int v_total_dim    = num_kv_heads * head_dim;
-    int attn_out_dim   = num_attn_heads * head_dim;
+    int attn_out_dim   = (weights && weights->attn_out_dim > 0) ? weights->attn_out_dim : (num_attn_heads * head_dim);
     int group_size     = num_attn_heads / (num_kv_heads > 0 ? num_kv_heads : 1);
 
     /* Step 1: Input RMSNorm */
-    rmsnorm(scratch->hidden_state, hidden_state, weights->attn_norm_w, hidden_dim, 1e-6f);
+    int add_one = (cfg && cfg->model_type == MODEL_TYPE_GEMMA) ? 1 : 0;
+    rmsnorm_ext(scratch->hidden_state, hidden_state, weights->attn_norm_w, hidden_dim, 1e-6f, add_one);
 
     /* Step 2: Projections */
     /* 2.1 Project Query + Gate */
@@ -271,13 +276,13 @@ void attention_forward(
     if (weights->attn_q_norm_w) {
         for (int h_q = 0; h_q < num_attn_heads; h_q++) {
             float *q_head = scratch->attn_q + h_q * q_dim_per_head;
-            rmsnorm(q_head, q_head, weights->attn_q_norm_w, head_dim, 1e-6f);
+            rmsnorm_ext(q_head, q_head, weights->attn_q_norm_w, head_dim, 1e-6f, add_one);
         }
     }
     if (weights->attn_k_norm_w) {
         for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
             float *k_head = scratch->attn_kv + h_kv * head_dim;
-            rmsnorm(k_head, k_head, weights->attn_k_norm_w, head_dim, 1e-6f);
+            rmsnorm_ext(k_head, k_head, weights->attn_k_norm_w, head_dim, 1e-6f, add_one);
         }
     }
 
@@ -330,6 +335,8 @@ void attention_forward(
         scale *= yarn_attn_scale;
     }
 
+    float softcap = (cfg ? cfg->attn_logit_softcapping : 0.0f);
+
     for (int h_q = 0; h_q < num_attn_heads; h_q++) {
         int h_kv = h_q / (group_size > 0 ? group_size : 1);
         const float *q_head = scratch->attn_q + h_q * q_dim_per_head;
@@ -338,8 +345,11 @@ void attention_forward(
             const uint8_t *p_cache_k = layer_cache + (size_t)p * kv_token_bytes;
             const void *k_head_ptr = p_cache_k + (size_t)h_kv * head_k_bytes;
 
-            float score = compute_qk_score(k_head_ptr, q_head, head_dim, ctype);
-            scores[p] = score * scale;
+            float score = compute_qk_score(k_head_ptr, q_head, head_dim, ctype) * scale;
+            if (softcap > 0.0f) {
+                score = softcap * tanhf(score / softcap);
+            }
+            scores[p] = score;
         }
 
         float max_score = scores[0];

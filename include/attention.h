@@ -20,6 +20,11 @@ typedef struct {
     int attn_k_w_type;
     int attn_v_w_type;
     int attn_output_w_type;
+
+    int q_total_dim;
+    int k_total_dim;
+    int v_total_dim;
+    int attn_out_dim;
 } attention_layer_weights;
 
 void attention_forward(

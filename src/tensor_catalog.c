@@ -698,7 +698,7 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     cfg->head_dim = cfg->key_length;
 
     GET_FLT(cfg->rope_freq_base, "rope.freq_base", 10000000.0f);
-    GET_U32(cfg->rope_dim, "rope.dimension_count", 64);
+    GET_U32(cfg->rope_dim, "rope.dimension_count", cfg->key_length);
 
     GET_FLT(cfg->rope_scaling_factor, "rope.scaling.factor", 1.0f);
     GET_U32(cfg->rope_orig_context_len, "rope.scaling.original_context_length", 4096);
@@ -726,6 +726,11 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     GET_U32(cfg->ssm_time_step_rank, "ssm.time_step_rank", 48);
     GET_U32(cfg->ssm_inner_size, "ssm.inner_size", 6144);
     GET_U32(cfg->full_attn_interval, "full_attention_interval", 4);
+
+    GET_FLT(cfg->attn_logit_softcapping, "attn_logit_softcapping", 0.0f);
+    if (cfg->attn_logit_softcapping == 0.0f) {
+        GET_FLT(cfg->attn_logit_softcapping, "attention.attn_logit_softcapping", 0.0f);
+    }
     GET_FLT(cfg->final_logit_softcapping, "final_logit_softcapping", 0.0f);
 
     #undef GET_U32
@@ -819,7 +824,7 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
         cfg->model_type = MODEL_TYPE_LLAMA;
     } else if (!strcasecmp(cfg->architecture, "mistral")) {
         cfg->model_type = MODEL_TYPE_MISTRAL;
-    } else if (!strcasecmp(cfg->architecture, "gemma") || !strcasecmp(cfg->architecture, "gemma2") || !strcasecmp(cfg->architecture, "gemma4")) {
+    } else if (!strncasecmp(cfg->architecture, "gemma", 5)) {
         cfg->model_type = MODEL_TYPE_GEMMA;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-hybrid")) {
         cfg->model_type = MODEL_TYPE_QWEN_HYBRID;

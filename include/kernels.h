@@ -29,6 +29,7 @@ int matvec_get_num_threads(void);
 
 // Root Mean Square Normalization (RMSNorm)
 void rmsnorm(float * restrict out, const float * restrict x, const float * restrict w, int n, float epsilon);
+void rmsnorm_ext(float * restrict out, const float * restrict x, const float * restrict w, int n, float epsilon, int add_one);
 
 // Element-wise residual addition: out[i] = a[i] + b[i]
 void add_residual(float * restrict out, const float * restrict a, const float * restrict b, int n);
@@ -38,6 +39,12 @@ void silu(float * restrict out, const float * restrict x, int n);
 
 // SwiGLU activation gate and up projection combine: out[i] = SiLU(gate[i]) * up[i]
 void swiglu(float * restrict out, const float * restrict gate, const float * restrict up, int n);
+
+// GELU activation: out[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+void gelu(float * restrict out, const float * restrict x, int n);
+
+// GeGLU activation gate and up projection combine: out[i] = GELU(gate[i]) * up[i]
+void geglu(float * restrict out, const float * restrict gate, const float * restrict up, int n);
 
 // Matrix-Vector Multiplication dispatcher (Multithreaded via pthreads)
 void matvec(
