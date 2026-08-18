@@ -59,7 +59,7 @@ make -j4
 ### 1. Basic Text Completion
 ```bash
 ./diskllm \
-    --model /path/to/Qwen3.8-27B-Q4_K_M.gguf \
+    --model model.gguf \
     --prompt "The capital of France is" \
     --max-tokens 16 \
     --threads 4
@@ -68,7 +68,7 @@ make -j4
 ### 2. Quiet Mode (Generated Text Only)
 ```bash
 ./diskllm \
-    --model /path/to/Qwen3.8-27B-Q4_K_M.gguf \
+    --model model.gguf \
     --chat \
     --system "You are a helpful AI assistant." \
     --prompt "What is quantum computing?" \
@@ -79,13 +79,13 @@ make -j4
 ```bash
 # Turn 1: Save state after initial prompt
 ./diskllm \
-    --model /path/to/Qwen3.8-27B-Q4_K_M.gguf \
+    --model model.gguf \
     --prompt "What is Paris?" \
     --save-state turn1.state
 
 # Turn 2: Restore state and continue conversation (Prefill takes < 0.1s!)
 ./diskllm \
-    --model /path/to/Qwen3.8-27B-Q4_K_M.gguf \
+    --model model.gguf \
     --load-state turn1.state \
     --prompt "Tell me about its landmarks." \
     --save-state turn2.state

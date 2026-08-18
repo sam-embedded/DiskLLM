@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-MODEL_PATH="/data/data/com.termux/files/home/models/Qwen3.8-27B-Q4_K_M.gguf"
+MODEL_PATH="${MODEL_PATH:-/data/data/com.termux/files/home/models/Qwen3.8-27B-Q4_K_M.gguf}"
+if [ ! -f "$MODEL_PATH" ]; then
+    MODEL_PATH="models/model.gguf"
+fi
 SCRATCH_DIR="scratch"
 mkdir -p "$SCRATCH_DIR"
 
