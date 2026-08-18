@@ -698,7 +698,12 @@ int main(int argc, char **argv) {
         }
         int max_prompt_toks = (int)strlen(prompt_text) * 2 + 128;
         prompt_tokens = malloc(max_prompt_toks * sizeof(int));
-        prompt_len = tokenizer_encode(g_tok, prompt_text, prompt_tokens, max_prompt_toks);
+        int offset = 0;
+        if (cfg->bos_token_id > 0 && cfg->bos_token_id < (uint32_t)cfg->vocab_size) {
+            prompt_tokens[offset++] = (int)cfg->bos_token_id;
+        }
+        int enc_cnt = tokenizer_encode(g_tok, prompt_text, prompt_tokens + offset, max_prompt_toks - offset);
+        prompt_len = offset + enc_cnt;
         if (prompt_len <= 0) {
             fprintf(stderr, "Error: Tokenizer produced 0 tokens for prompt text.\n");
             free(prompt_tokens); free_qwen_model_config(cfg); free_tensor_catalog(catalog);
