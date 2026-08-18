@@ -5,7 +5,7 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-    const char *model_path = "/data/data/com.termux/files/home/models/Qwen3.8-27B-Q4_K_M.gguf";
+    const char *model_path = "/home/sam/models/Qwen3.8-27B-Q4_K_M.gguf";
     if (argc > 1) {
         model_path = argv[1];
     }

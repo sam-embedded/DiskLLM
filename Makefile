@@ -1,6 +1,13 @@
 INCLUDES = -Iinclude
 DEFINES  = -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
-ALL_CFLAGS = -std=c11 -Wall -Wextra -O3 $(DEFINES) $(INCLUDES) -march=armv8.2-a+dotprod -ffast-math $(CFLAGS)
+
+UNAME_M := $(shell uname -m)
+ARCH_FLAGS =
+ifneq (,$(filter aarch64 arm64 armv8%,$(UNAME_M)))
+    ARCH_FLAGS = -march=armv8.2-a+dotprod
+endif
+
+ALL_CFLAGS = -std=c11 -Wall -Wextra -O3 $(DEFINES) $(INCLUDES) $(ARCH_FLAGS) -ffast-math $(CFLAGS)
 
 # Link flags
 LFLAGS = -lm -lpthread
