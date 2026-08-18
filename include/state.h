@@ -20,7 +20,7 @@ typedef struct {
     size_t ssm_states_size; // in bytes
 
     // SSM Convolution History for 48 SSM layers
-    // Shape: [48, 3, 6144]
+    // Shape: [48, 3, 10240]
     float *ssm_conv_histories;
     size_t ssm_conv_histories_size; // in bytes
 } model_state;

@@ -1,10 +1,20 @@
-# Build artifacts
 build/
+*.o
+diskllm
+diskllm_asan
+diskllm_debug
 gguf_dump
 tensor_map
 probe_model
 bench_stream
 test_dequant
-
-# OS-specific
-.DS_Store
+test_kernels
+test_attention
+test_ssm
+test_tokenizer
+dump_ref_logits
+test_crash
+*.state
+*.bin
+*.gguf
+scratch/

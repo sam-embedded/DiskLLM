@@ -46,9 +46,9 @@ model_state *allocate_model_state(int context_length) {
     memset(state->ssm_states, 0, state->ssm_states_size);
 
     // 3. Allocate SSM Convolution Histories
-    // Shape: [48, 3, 6144]
+    // Shape: [48, 3, 10240]
     // Note: conv kernel is 4, so history stores (4 - 1) = 3 states
-    state->ssm_conv_histories_size = 48ULL * 3ULL * 6144ULL * sizeof(float);
+    state->ssm_conv_histories_size = 48ULL * 3ULL * 10240ULL * sizeof(float);
     ret = posix_memalign((void **)&state->ssm_conv_histories, 64, state->ssm_conv_histories_size);
     if (ret != 0 || !state->ssm_conv_histories) {
         fprintf(stderr, "Error: Failed to allocate SSM conv history of size %" PRIu64 " bytes.\n", (uint64_t)state->ssm_conv_histories_size);

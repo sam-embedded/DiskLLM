@@ -1,22 +1,48 @@
-CC = cc
-CFLAGS = -std=c11 -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -Iinclude
+INCLUDES = -Iinclude
+DEFINES  = -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
+ALL_CFLAGS = -std=c11 -Wall -Wextra -O3 $(DEFINES) $(INCLUDES) -march=armv8.2-a+dotprod -ffast-math $(CFLAGS)
 
-all: gguf_dump tensor_map probe_model bench_stream test_dequant
+# Link flags
+LFLAGS = -lm -lpthread
+
+SRCS_CORE = src/attention.c src/ssm.c src/dequant.c src/rmsnorm.c \
+            src/swiglu.c src/matvec.c src/state.c src/scratch.c \
+            src/tensor_catalog.c src/layer_map.c src/sampler.c src/stream.c \
+            src/tokenizer.c
+
+all: gguf_dump tensor_map probe_model bench_stream test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm
 
 gguf_dump: tools/gguf_dump.c
-	$(CC) $(CFLAGS) $< -o $@
+	$(CC) $(ALL_CFLAGS) $< -o $@ $(LFLAGS)
 
 tensor_map: tools/tensor_map.c
-	$(CC) $(CFLAGS) $< -o $@
+	$(CC) $(ALL_CFLAGS) $< -o $@ $(LFLAGS)
 
 probe_model: tools/probe_model.c src/state.c src/scratch.c
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 bench_stream: tools/bench_stream.c src/state.c src/scratch.c src/stream.c
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 test_dequant: tools/test_dequant.c src/dequant.c
-	$(CC) $(CFLAGS) $^ -o $@ -lm
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+test_kernels: tools/test_kernels.c src/dequant.c src/rmsnorm.c src/swiglu.c src/matvec.c
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+test_attention: tools/test_attention.c src/attention.c src/dequant.c src/rmsnorm.c src/swiglu.c src/matvec.c src/state.c src/scratch.c
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+test_ssm: tools/test_ssm.c src/ssm.c src/dequant.c src/rmsnorm.c src/swiglu.c src/matvec.c src/state.c src/scratch.c
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+test_tokenizer: tools/test_tokenizer.c src/tokenizer.c
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+diskllm: main/diskllm.c $(SRCS_CORE)
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 clean:
-	rm -f gguf_dump tensor_map probe_model bench_stream test_dequant
+	rm -f gguf_dump tensor_map probe_model bench_stream \
+	      test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm
+

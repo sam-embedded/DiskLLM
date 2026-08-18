@@ -4,57 +4,6 @@
 #include <string.h>
 #include <assert.h>
 
-// Helper to convert float bits to float value
-static inline float fp32_from_bits(uint32_t w) {
-    union {
-        uint32_t as_bits;
-        float as_value;
-    } fp32;
-    fp32.as_bits = w;
-    return fp32.as_value;
-}
-
-// Helper to convert float value to float bits
-static inline uint32_t fp32_to_bits(float f) {
-    union {
-        float as_value;
-        uint32_t as_bits;
-    } fp32;
-    fp32.as_value = f;
-    return fp32.as_bits;
-}
-
-// Portable C FP16 (uint16_t representation) to FP32 conversion
-static inline float fp16_to_fp32(uint16_t h) {
-    const uint32_t w = (uint32_t) h << 16;
-    const uint32_t sign = w & 0x80000000;
-    const uint32_t two_w = w + w;
-
-    const uint32_t exp_offset = 0xE0 << 23;
-    const float exp_scale = fp32_from_bits(0x7800000);
-    const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
-
-    const uint32_t magic_mask = 126 << 23;
-    const float magic_bias = 0.5f;
-    const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
-
-    const uint32_t denormalized_cutoff = 1 << 27;
-    const uint32_t result = sign |
-        (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
-    return fp32_from_bits(result);
-}
-
-// Helper to extract 6-bit scale and min values from packed scales array
-static inline void get_scale_min_k4(int j, const uint8_t * restrict q, uint8_t * restrict d, uint8_t * restrict m) {
-    if (j < 4) {
-        *d = q[j] & 63; 
-        *m = q[j + 4] & 63;
-    } else {
-        *d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4);
-        *m = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4);
-    }
-}
-
 // Dequantize F32: Simple copy
 void dequantize_f32(const void * restrict x, float * restrict y, int k) {
     const float *src = (const float *)x;
