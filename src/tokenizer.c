@@ -286,6 +286,9 @@ tokenizer *tokenizer_init(const char *gguf_path) {
                     tok->tokens[idx] = read_gguf_string(f);
                     if (tok->tokens[idx]) {
                         vocab_table_insert(tok, tok->tokens[idx], (int32_t)idx);
+                        if (tok->tokens[idx][0] == '<' && strchr(tok->tokens[idx], '>')) {
+                            register_special_token(tok, tok->tokens[idx], (int32_t)idx);
+                        }
                     }
                 }
             } else skip_val(f, val_type);

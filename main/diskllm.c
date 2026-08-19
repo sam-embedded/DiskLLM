@@ -378,7 +378,8 @@ static void print_usage(const char *prog) {
     printf("  --min-p <P>                 Min-P sampling\n");
     printf("  --repeat-penalty <val>      Repetition penalty factor (default: 1.0)\n");
     printf("  --stop-token <id>           Extra stop token ID (can be repeated)\n");
-    printf("  --chat                      Auto-wrap prompt in Qwen chat template\n");
+    printf("  --chat                      Auto-wrap prompt in ChatML / Instruct template\n");
+    printf("  --interactive, -i           Run interactive multi-turn REPL chat mode\n");
     printf("  --warm-cache                 Pre-warm OS page cache for model file\n");
     printf("  --io-mode <pread|mmap>      I/O streaming mode (default: pread)\n");
     printf("  --log-io-per-token          Log I/O wait vs compute breakdown per generated token\n");
@@ -556,6 +557,7 @@ int main(int argc, char **argv) {
     int      dump_layer          = -1;
     float    repeat_penalty      = 1.0f;
     int      is_chat             = 0;
+    int      is_interactive      = 0;
     int      lookup_id_val       = -1;
     char    *lookup_ids_arg      = NULL;
     char    *search_token_q      = NULL;
@@ -603,6 +605,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--stop-token"))        { if(extra_stop_cnt<32&&i+1<argc) extra_stops[extra_stop_cnt++]=atoi(argv[++i]); else i++; }
         else if (!strcmp(argv[i],"--dump-layer"))        { NEXTINT(dump_layer); }
         else if (!strcmp(argv[i],"--chat"))              { is_chat = 1; }
+        else if (!strcmp(argv[i],"--interactive")||!strcmp(argv[i],"-i")) { is_interactive = 1; is_chat = 1; }
         else if (!strcmp(argv[i],"--quiet"))             { quiet = 1; }
         else if (!strcmp(argv[i],"--show-special-tokens")) { show_special_tokens = 1; }
         else if (!strcmp(argv[i],"--version"))           { printf("DiskLLM v1.0.0\n"); return 0; }
@@ -667,7 +670,7 @@ int main(int argc, char **argv) {
     }
 
     if (!quiet) {
-        fprintf(stderr, "[INFO] Model arch: %s, type: %d, blocks: %d, hidden: %d, heads: %d/%d, key_len: %d, attn_layers: %d\n",
+        fprintf(stderr, "\033[1;36m[INFO]\033[0m Model arch: %s, type: %d, blocks: %d, hidden: %d, heads: %d/%d, key_len: %d, attn_layers: %d\n",
                 cfg->architecture, cfg->model_type, cfg->block_count, cfg->hidden_dim, cfg->num_attn_heads, cfg->num_kv_heads, cfg->key_length, cfg->num_attn_layers);
     }
 
@@ -731,6 +734,12 @@ int main(int argc, char **argv) {
                     snprintf(chat_buf, blen, "<|start_header_id|>system<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", system_text, prompt_text);
                 } else {
                     snprintf(chat_buf, blen, "<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", prompt_text);
+                }
+            } else if (cfg->model_type == MODEL_TYPE_MISTRAL) {
+                if (system_text) {
+                    snprintf(chat_buf, blen, "[INST] %s\n\n%s [/INST]", system_text, prompt_text);
+                } else {
+                    snprintf(chat_buf, blen, "[INST] %s [/INST]", prompt_text);
                 }
             } else {
                 if (system_text) {
@@ -1169,7 +1178,7 @@ int main(int argc, char **argv) {
     if (cur_rss > peak_rss) peak_rss = cur_rss;
     if (log_rss) printf("[RSS] after prefill: %ld MB\n", cur_rss);
 
-    printf("\n[STREAM] ");
+    printf("\n\033[1;32m[STREAM]\033[0m ");
     if (g_tok) {
         char piece[256];
         tokenizer_decode_token(g_tok, next_tok, 1, piece, sizeof(piece));
