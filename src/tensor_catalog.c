@@ -832,6 +832,19 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
         cfg->model_type = MODEL_TYPE_MISTRAL;
     } else if (!strncasecmp(cfg->architecture, "gemma", 5)) {
         cfg->model_type = MODEL_TYPE_GEMMA;
+    } else if (!strcasecmp(cfg->architecture, "phi3") || !strcasecmp(cfg->architecture, "phi-3")) {
+        cfg->model_type = MODEL_TYPE_PHI3;
+        cfg->has_fused_qkv = 1;
+        /* Phi-3 doesn't store rope.freq_base; default to 10000 */
+        if (cfg->rope_freq_base <= 0.0f || cfg->rope_freq_base > 1e9f) {
+            cfg->rope_freq_base = 10000.0f;
+        }
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "phi3")) {
+        cfg->model_type = MODEL_TYPE_PHI3;
+        cfg->has_fused_qkv = 1;
+        if (cfg->rope_freq_base <= 0.0f || cfg->rope_freq_base > 1e9f) {
+            cfg->rope_freq_base = 10000.0f;
+        }
     } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-hybrid")) {
         cfg->model_type = MODEL_TYPE_QWEN_HYBRID;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "qwen-attention")) {
@@ -846,7 +859,15 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
         if (has_ssm_tensors) {
             cfg->model_type = MODEL_TYPE_QWEN_HYBRID;
         } else if (has_attn_tensors) {
-            cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
+            /* Check for fused QKV (phi3-style) by scanning tensors */
+            char fused_test[256];
+            snprintf(fused_test, sizeof(fused_test), "blk.0.attn_qkv.weight");
+            if (find_tensor(cat, fused_test) != NULL) {
+                cfg->model_type = MODEL_TYPE_PHI3;
+                cfg->has_fused_qkv = 1;
+            } else {
+                cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
+            }
         } else {
             cfg->model_type = MODEL_TYPE_UNSUPPORTED;
         }

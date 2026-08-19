@@ -118,22 +118,43 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwe
 
     if (blk->l_type == LAYER_TYPE_ATTENTION) {
         LOAD_NORM(blk->u.attn.attn_norm_w,               "blk.%d.attn_norm.weight");
-        LOAD(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
-        LOAD_NORM_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
-        LOAD(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
-        LOAD_NORM_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
-        LOAD(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+        if (cfg->has_fused_qkv) {
+            /* Phi-3 style: single fused QKV tensor */
+            LOAD(blk->u.attn.attn_qkv_w, "blk.%d.attn_qkv.weight", blk->u.attn.attn_qkv_w_type);
+            blk->u.attn.attn_q_w = NULL;
+            blk->u.attn.attn_k_w = NULL;
+            blk->u.attn.attn_v_w = NULL;
+            /* Compute dims from fused tensor shape */
+            snprintf(nm, sizeof(nm), "blk.%d.attn_qkv.weight", li);
+            const tensor_info *ti_qkv = find_tensor(cat, nm);
+            if (ti_qkv && ti_qkv->n_dims >= 2) {
+                int total_qkv = (int)ti_qkv->dims[1];
+                int head_dim  = cfg->key_length;
+                int n_heads   = cfg->num_attn_heads;
+                int n_kv      = cfg->num_kv_heads;
+                blk->u.attn.q_total_dim = n_heads * head_dim;
+                blk->u.attn.k_total_dim = n_kv    * head_dim;
+                blk->u.attn.v_total_dim = n_kv    * head_dim;
+                (void)total_qkv;
+            }
+        } else {
+            LOAD(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
+            LOAD_NORM_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
+            LOAD(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
+            LOAD_NORM_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
+            LOAD(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+            blk->u.attn.attn_qkv_w = NULL;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
+            const tensor_info *ti_q = find_tensor(cat, nm);
+            blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
+            const tensor_info *ti_k = find_tensor(cat, nm);
+            blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
+            const tensor_info *ti_v = find_tensor(cat, nm);
+            blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
+        }
         LOAD(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
-
-        snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
-        const tensor_info *ti_q = find_tensor(cat, nm);
-        blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
-        snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
-        const tensor_info *ti_k = find_tensor(cat, nm);
-        blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
-        snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
-        const tensor_info *ti_v = find_tensor(cat, nm);
-        blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
         snprintf(nm, sizeof(nm), "blk.%d.attn_output.weight", li);
         const tensor_info *ti_o = find_tensor(cat, nm);
         blk->u.attn.attn_out_dim = (ti_o && ti_o->n_dims >= 2) ? (int)ti_o->dims[0] : 0;
@@ -158,7 +179,14 @@ static int load_layer_block_weights(int fd, const tensor_catalog *cat, const qwe
     if (!_ti_post) { fprintf(stderr, "[ERROR] Missing layer norm tensor: blk.%d.(post_attention_norm|ffn_norm).weight\n", li); return -1; }
     if (load_tensor_to_buf(fd, _ti_post, p, ctr) != 0) return -1;
     blk->post_attn_norm_w = (const float *)p; p += _ti_post->byte_size;
-    LOAD(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
+    /* Phi-3 uses a combined ffn_up (gate+up packed) with no separate gate tensor */
+    snprintf(nm, sizeof(nm), "blk.%d.ffn_gate.weight", li);
+    if (find_tensor(cat, nm)) {
+        LOAD(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
+    } else {
+        blk->ffn_gate_w = NULL;
+        blk->ffn_gate_w_type = 0;
+    }
     LOAD(blk->ffn_up_w,   "blk.%d.ffn_up.weight",   blk->ffn_up_w_type);
     LOAD(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
 #undef LOAD
@@ -198,22 +226,38 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, const qwen_m
 
     if (blk->l_type == LAYER_TYPE_ATTENTION) {
         LOAD_NORM_MMAP(blk->u.attn.attn_norm_w,               "blk.%d.attn_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
-        LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
-        LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
-        LOAD_MMAP(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+        if (cfg->has_fused_qkv) {
+            /* Phi-3 style: single fused QKV tensor */
+            LOAD_MMAP(blk->u.attn.attn_qkv_w, "blk.%d.attn_qkv.weight", blk->u.attn.attn_qkv_w_type);
+            blk->u.attn.attn_q_w = NULL;
+            blk->u.attn.attn_k_w = NULL;
+            blk->u.attn.attn_v_w = NULL;
+            blk->u.attn.attn_q_norm_w = NULL;
+            blk->u.attn.attn_k_norm_w = NULL;
+            int head_dim  = cfg->key_length;
+            int n_heads   = cfg->num_attn_heads;
+            int n_kv      = cfg->num_kv_heads;
+            blk->u.attn.q_total_dim = n_heads * head_dim;
+            blk->u.attn.k_total_dim = n_kv    * head_dim;
+            blk->u.attn.v_total_dim = n_kv    * head_dim;
+        } else {
+            LOAD_MMAP(blk->u.attn.attn_q_w,                       "blk.%d.attn_q.weight",   blk->u.attn.attn_q_w_type);
+            LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_q_norm_w,   "blk.%d.attn_q_norm.weight");
+            LOAD_MMAP(blk->u.attn.attn_k_w,                       "blk.%d.attn_k.weight",   blk->u.attn.attn_k_w_type);
+            LOAD_NORM_MMAP_OPTIONAL(blk->u.attn.attn_k_norm_w,   "blk.%d.attn_k_norm.weight");
+            LOAD_MMAP(blk->u.attn.attn_v_w,                       "blk.%d.attn_v.weight",   blk->u.attn.attn_v_w_type);
+            blk->u.attn.attn_qkv_w = NULL;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
+            const tensor_info *ti_q = find_tensor(cat, nm);
+            blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
+            const tensor_info *ti_k = find_tensor(cat, nm);
+            blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
+            snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
+            const tensor_info *ti_v = find_tensor(cat, nm);
+            blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
+        }
         LOAD_MMAP(blk->u.attn.attn_output_w,                  "blk.%d.attn_output.weight", blk->u.attn.attn_output_w_type);
-
-        snprintf(nm, sizeof(nm), "blk.%d.attn_q.weight", li);
-        const tensor_info *ti_q = find_tensor(cat, nm);
-        blk->u.attn.q_total_dim = (ti_q && ti_q->n_dims >= 2) ? (int)ti_q->dims[1] : 0;
-        snprintf(nm, sizeof(nm), "blk.%d.attn_k.weight", li);
-        const tensor_info *ti_k = find_tensor(cat, nm);
-        blk->u.attn.k_total_dim = (ti_k && ti_k->n_dims >= 2) ? (int)ti_k->dims[1] : 0;
-        snprintf(nm, sizeof(nm), "blk.%d.attn_v.weight", li);
-        const tensor_info *ti_v = find_tensor(cat, nm);
-        blk->u.attn.v_total_dim = (ti_v && ti_v->n_dims >= 2) ? (int)ti_v->dims[1] : 0;
         snprintf(nm, sizeof(nm), "blk.%d.attn_output.weight", li);
         const tensor_info *ti_o = find_tensor(cat, nm);
         blk->u.attn.attn_out_dim = (ti_o && ti_o->n_dims >= 2) ? (int)ti_o->dims[0] : 0;
@@ -237,7 +281,14 @@ static int load_layer_block_weights_mmap(const tensor_catalog *cat, const qwen_m
     }
     if (!_ti_post_m) { fprintf(stderr, "[ERROR] Missing layer norm tensor: blk.%d.(post_attention_norm|ffn_norm).weight\n", li); return -1; }
     blk->post_attn_norm_w = (const float *)(mmap_base + _ti_post_m->absolute_offset);
-    LOAD_MMAP(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
+    /* Phi-3 has no separate ffn_gate tensor (it's packed into ffn_up) */
+    snprintf(nm, sizeof(nm), "blk.%d.ffn_gate.weight", li);
+    if (find_tensor(cat, nm)) {
+        LOAD_MMAP(blk->ffn_gate_w, "blk.%d.ffn_gate.weight", blk->ffn_gate_w_type);
+    } else {
+        blk->ffn_gate_w = NULL;
+        blk->ffn_gate_w_type = 0;
+    }
     LOAD_MMAP(blk->ffn_up_w,   "blk.%d.ffn_up.weight",   blk->ffn_up_w_type);
     LOAD_MMAP(blk->ffn_down_w, "blk.%d.ffn_down.weight",  blk->ffn_down_w_type);
 #undef LOAD_MMAP
@@ -759,6 +810,13 @@ int main(int argc, char **argv) {
                 } else {
                     snprintf(chat_buf, blen, "[INST] %s [/INST]", prompt_text);
                 }
+            } else if (cfg->model_type == MODEL_TYPE_PHI3) {
+                /* Phi-3 Instruct chat template */
+                if (system_text) {
+                    snprintf(chat_buf, blen, "<|system|>\n%s<|end|>\n<|user|>\n%s<|end|>\n<|assistant|>\n", system_text, prompt_text);
+                } else {
+                    snprintf(chat_buf, blen, "<|user|>\n%s<|end|>\n<|assistant|>\n", prompt_text);
+                }
             } else {
                 if (system_text) {
                     snprintf(chat_buf, blen, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_text, prompt_text);
@@ -850,6 +908,10 @@ int main(int argc, char **argv) {
 
     uint32_t eos_id = cfg->eos_token_id;
     uint32_t bos_id = cfg->bos_token_id;
+    if (cfg->model_type == MODEL_TYPE_PHI3) {
+        if (extra_stop_cnt < 32) extra_stops[extra_stop_cnt++] = 32007; // <|end|>
+        if (extra_stop_cnt < 32) extra_stops[extra_stop_cnt++] = 32000; // <|endoftext|>
+    }
     if (!quiet) fprintf(stderr, "[INFO] Model EOS ID: %u, BOS ID: %u\n", eos_id, bos_id);
 
     scratch_buffers *scratch = allocate_scratch_buffers(cfg);
@@ -1131,10 +1193,17 @@ int main(int argc, char **argv) {
                     ssm_layer_forward(h, pos, li, &blk->u.ssm, state, scratch, cfg);
 
                 rmsnorm_ext(scratch->hidden_state, h, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
-                matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                       cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
-                matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                       cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                if (blk->ffn_gate_w) {
+                    matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                    matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
+                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                } else {
+                    /* Phi-3: ffn_up contains [gate | up] packed as 2*ffn_dim rows */
+                    matvec(scratch->ffn_gate, blk->ffn_up_w, scratch->hidden_state,
+                           cfg->hidden_dim, 2 * cfg->ffn_dim, blk->ffn_up_w_type, scratch->ssm_qkv);
+                    memcpy(scratch->ffn_up, scratch->ffn_gate + cfg->ffn_dim, cfg->ffn_dim * sizeof(float));
+                }
                 if (cfg->model_type == MODEL_TYPE_GEMMA) {
                     geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                 } else {
@@ -1300,10 +1369,17 @@ int main(int argc, char **argv) {
                 {
                     double t0 = get_time_ms();
                     rmsnorm_ext(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
-                    matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
-                    matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    if (blk->ffn_gate_w) {
+                        matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
+                               cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                        matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
+                               cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    } else {
+                        /* Phi-3: ffn_up packs [gate | up] as 2*ffn_dim rows */
+                        matvec(scratch->ffn_gate, blk->ffn_up_w, scratch->hidden_state,
+                               cfg->hidden_dim, 2 * cfg->ffn_dim, blk->ffn_up_w_type, scratch->ssm_qkv);
+                        memcpy(scratch->ffn_up, scratch->ffn_gate + cfg->ffn_dim, cfg->ffn_dim * sizeof(float));
+                    }
                     if (cfg->model_type == MODEL_TYPE_GEMMA) {
                         geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                     } else {
@@ -1357,10 +1433,17 @@ int main(int argc, char **argv) {
                 {
                     double t0 = get_time_ms();
                     rmsnorm_ext(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, add_one);
-                    matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
-                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
-                    matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
-                           cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    if (blk->ffn_gate_w) {
+                        matvec(scratch->ffn_gate, blk->ffn_gate_w, scratch->hidden_state,
+                               cfg->hidden_dim, cfg->ffn_dim, blk->ffn_gate_w_type, scratch->ssm_qkv);
+                        matvec(scratch->ffn_up,   blk->ffn_up_w,   scratch->hidden_state,
+                               cfg->hidden_dim, cfg->ffn_dim, blk->ffn_up_w_type,   scratch->ssm_qkv);
+                    } else {
+                        /* Phi-3: ffn_up packs [gate | up] as 2*ffn_dim rows */
+                        matvec(scratch->ffn_gate, blk->ffn_up_w, scratch->hidden_state,
+                               cfg->hidden_dim, 2 * cfg->ffn_dim, blk->ffn_up_w_type, scratch->ssm_qkv);
+                        memcpy(scratch->ffn_up, scratch->ffn_gate + cfg->ffn_dim, cfg->ffn_dim * sizeof(float));
+                    }
                     if (cfg->model_type == MODEL_TYPE_GEMMA) {
                         geglu(scratch->ffn_gate, scratch->ffn_gate, scratch->ffn_up, cfg->ffn_dim);
                     } else {

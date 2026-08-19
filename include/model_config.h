@@ -12,7 +12,8 @@ typedef enum {
     MODEL_TYPE_LLAMA = 2,
     MODEL_TYPE_MISTRAL = 3,
     MODEL_TYPE_GEMMA = 4,
-    MODEL_TYPE_UNSUPPORTED = 5
+    MODEL_TYPE_UNSUPPORTED = 5,
+    MODEL_TYPE_PHI3 = 6
 } model_type_enum;
 
 typedef enum {
@@ -61,6 +62,7 @@ typedef struct qwen_model_config {
 
     int has_nextn;
     int is_tied_embedding;
+    int has_fused_qkv;      /* 1 = QKV are packed into a single attn_qkv.weight tensor (e.g. Phi-3) */
 
     layer_type layer_types[1024];
     int layer_has_nextn[1024];

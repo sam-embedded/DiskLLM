@@ -286,7 +286,7 @@ tokenizer *tokenizer_init(const char *gguf_path) {
                     tok->tokens[idx] = read_gguf_string(f);
                     if (tok->tokens[idx]) {
                         vocab_table_insert(tok, tok->tokens[idx], (int32_t)idx);
-                        if (tok->tokens[idx][0] == '<' && strchr(tok->tokens[idx], '>')) {
+                        if (tok->tokens[idx][0] == '<' && strchr(tok->tokens[idx], '>') && strncmp(tok->tokens[idx], "<0x", 3) != 0) {
                             register_special_token(tok, tok->tokens[idx], (int32_t)idx);
                         }
                     }
@@ -547,7 +547,7 @@ static void sentencepiece_encode_segment(const tokenizer *tok, const char *text,
     if (!sp_str) return;
     size_t sp_len = 0;
 
-    if (text[0] != ' ') {
+    if (text[0] != ' ' && text[0] != '\n' && text[0] != '\r') {
         sp_str[sp_len++] = (char)0xE2;
         sp_str[sp_len++] = (char)0x96;
         sp_str[sp_len++] = (char)0x81;

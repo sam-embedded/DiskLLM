@@ -245,6 +245,7 @@ void attention_forward(
     int rope_dim       = cfg ? cfg->rope_dim : head_dim;
     if (rope_dim > head_dim) rope_dim = head_dim;
 
+    int is_phi3 = (cfg && cfg->model_type == MODEL_TYPE_PHI3);
     int is_qwen = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
     int q_dim_per_head = is_qwen ? (head_dim * 2) : head_dim;
     int q_total_dim    = num_attn_heads * q_dim_per_head;
@@ -258,6 +259,93 @@ void attention_forward(
     rmsnorm_ext(scratch->hidden_state, hidden_state, weights->attn_norm_w, hidden_dim, 1e-6f, add_one);
 
     /* Step 2: Projections */
+    if (is_phi3 && weights && weights->attn_qkv_w) {
+        /* Phi-3: single fused QKV matvec, then split */
+        int fused_qkv_dim = q_total_dim + k_total_dim + v_total_dim;
+        /* Use ssm_qkv scratch as temp buffer (must be large enough) */
+        float *fused_buf = (float *)scratch->ssm_qkv;
+        matvec(
+            fused_buf,
+            weights->attn_qkv_w,
+            scratch->hidden_state,
+            hidden_dim,
+            fused_qkv_dim,
+            weights->attn_qkv_w_type,
+            scratch->ssm_qkv + fused_qkv_dim * sizeof(float)
+        );
+        /* Split: Q first, then K, then V */
+        memcpy(scratch->attn_q,  fused_buf,                       q_total_dim * sizeof(float));
+        memcpy(scratch->attn_kv, fused_buf + q_total_dim,         k_total_dim * sizeof(float));
+        /* Store K cache first, then compute V */
+        /* Step 2.4 Apply RoPE (neox style for Phi-3) */
+        for (int h_q = 0; h_q < num_attn_heads; h_q++) {
+            float *q_head = scratch->attn_q + h_q * q_dim_per_head;
+            apply_rope(q_head, pos, freq_base, rope_dim, cfg);
+        }
+        for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
+            float *k_head = scratch->attn_kv + h_kv * head_dim;
+            apply_rope(k_head, pos, freq_base, rope_dim, cfg);
+        }
+
+        int cache_layer_idx_f = state->layer_to_attn_idx[layer_idx];
+        if (cache_layer_idx_f < 0) cache_layer_idx_f = 0;
+        cache_type_t ctype_f = state->cache_type;
+        size_t kv_token_bytes_f = state->kv_token_bytes;
+        size_t vec_bytes_f = kv_token_bytes_f / 2;
+        uint8_t *layer_cache_f = (uint8_t *)state->kv_cache + (size_t)cache_layer_idx_f * (size_t)state->context_length * kv_token_bytes_f;
+        uint8_t *cache_k_f = layer_cache_f + (size_t)pos * kv_token_bytes_f;
+        uint8_t *cache_v_f = cache_k_f + vec_bytes_f;
+        store_kv_vector(cache_k_f, scratch->attn_kv, k_total_dim, ctype_f);
+        /* Copy V from fused_buf */
+        const float *v_src = fused_buf + q_total_dim + k_total_dim;
+        store_kv_vector(cache_v_f, v_src, v_total_dim, ctype_f);
+
+        /* Attention computation (GQA) */
+        float *attn_out_f = scratch->ffn_gate;
+        float *scores_f   = scratch->ffn_up;
+        float scale_f = 1.0f / sqrtf((float)head_dim);
+        float softcap_f = (cfg ? cfg->attn_logit_softcapping : 0.0f);
+        size_t head_k_bytes_f = vec_bytes_f / (num_kv_heads > 0 ? num_kv_heads : 1);
+        size_t head_v_bytes_f = head_k_bytes_f;
+
+        for (int h_q = 0; h_q < num_attn_heads; h_q++) {
+            int h_kv = h_q / (group_size > 0 ? group_size : 1);
+            const float *q_head_f = scratch->attn_q + h_q * q_dim_per_head;
+            for (int p = 0; p <= pos; p++) {
+                const uint8_t *p_cache_k = layer_cache_f + (size_t)p * kv_token_bytes_f;
+                const void *k_head_ptr = p_cache_k + (size_t)h_kv * head_k_bytes_f;
+                float score = compute_qk_score(k_head_ptr, q_head_f, head_dim, ctype_f) * scale_f;
+                if (softcap_f > 0.0f) score = softcap_f * tanhf(score / softcap_f);
+                scores_f[p] = score;
+            }
+            float max_s = scores_f[0];
+            for (int p = 1; p <= pos; p++) if (scores_f[p] > max_s) max_s = scores_f[p];
+            double sum_e = 0.0;
+            for (int p = 0; p <= pos; p++) { scores_f[p] = expf(scores_f[p] - max_s); sum_e += scores_f[p]; }
+            float inv_s = (float)(1.0 / sum_e);
+            for (int p = 0; p <= pos; p++) scores_f[p] *= inv_s;
+            float *out_head_f = attn_out_f + h_q * head_dim;
+            memset(out_head_f, 0, head_dim * sizeof(float));
+            for (int p = 0; p <= pos; p++) {
+                const uint8_t *p_cache_v = layer_cache_f + (size_t)p * kv_token_bytes_f + vec_bytes_f;
+                const void *v_head_ptr = p_cache_v + (size_t)h_kv * head_v_bytes_f;
+                add_v_scaled(out_head_f, v_head_ptr, scores_f[p], head_dim, ctype_f);
+            }
+        }
+        /* Output projection */
+        matvec(
+            scratch->hidden_state,
+            weights->attn_output_w,
+            attn_out_f,
+            attn_out_dim,
+            hidden_dim,
+            weights->attn_output_w_type,
+            scratch->ssm_qkv
+        );
+        add_residual(hidden_state, hidden_state, scratch->hidden_state, hidden_dim);
+        return;
+    }
+
     /* 2.1 Project Query + Gate */
     matvec(
         scratch->attn_q,

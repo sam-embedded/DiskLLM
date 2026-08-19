@@ -15,11 +15,13 @@ typedef struct {
     const float *attn_k_norm_w;
     const void *attn_v_w;
     const void *attn_output_w;
+    const void *attn_qkv_w;   /* fused QKV weight for Phi-3 style models */
     
     int attn_q_w_type;
     int attn_k_w_type;
     int attn_v_w_type;
     int attn_output_w_type;
+    int attn_qkv_w_type;      /* type for fused QKV */
 
     int q_total_dim;
     int k_total_dim;
