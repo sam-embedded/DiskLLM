@@ -381,6 +381,7 @@ static void print_usage(const char *prog) {
     printf("  --chat                      Auto-wrap prompt in ChatML / Instruct template\n");
     printf("  --interactive, -i           Run interactive multi-turn REPL chat mode\n");
     printf("  --warm-cache                 Pre-warm OS page cache for model file\n");
+    printf("  --pin-weights               Pin model into RAM (mlock) for zero-I/O decode\n");
     printf("  --io-mode <pread|mmap>      I/O streaming mode (default: pread)\n");
     printf("  --log-io-per-token          Log I/O wait vs compute breakdown per generated token\n");
     printf("  --profile-decode            Print detailed decode profiling breakdown\n");
@@ -525,6 +526,20 @@ static void run_missing_tensor_diagnostics(const tensor_catalog *cat, const qwen
     }
 }
 
+static uint64_t get_available_memory_bytes(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256];
+    uint64_t avail_kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "MemAvailable: %" SCNu64 " kB", &avail_kb) == 1) {
+            break;
+        }
+    }
+    fclose(f);
+    return avail_kb * 1024ULL;
+}
+
 /* ─── Main Execution ────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -550,6 +565,8 @@ int main(int argc, char **argv) {
     int      log_rss             = 0;
     int      profile_decode      = 0;
     int      warm_cache          = 0;
+    int      pin_weights         = 0;
+    int      is_mmap_mode        = 0;
     char    *io_mode_str         = "pread";
     int      log_io_per_token    = 0;
     int      quiet               = 0;
@@ -621,6 +638,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--log-rss"))           { log_rss = 1; }
         else if (!strcmp(argv[i],"--profile-decode"))    { profile_decode = 1; }
         else if (!strcmp(argv[i],"--warm-cache"))        { warm_cache = 1; }
+        else if (!strcmp(argv[i],"--pin-weights"))       { pin_weights = 1; is_mmap_mode = 1; }
         else if (!strcmp(argv[i],"--io-mode"))          { NEXTARG(io_mode_str); }
         else if (!strcmp(argv[i],"--log-io-per-token")) { log_io_per_token = 1; }
         else if (!strcmp(argv[i],"--greedy"))            { scfg.temperature = 0.0f; }
@@ -878,7 +896,9 @@ int main(int argc, char **argv) {
     size_t embed_row_bytes = ti_emb->byte_size / (ti_emb->dims[1] > 0 ? ti_emb->dims[1] : cfg->vocab_size);
     size_t logit_row_bytes = ti_outw->byte_size / (ti_outw->dims[1] > 0 ? ti_outw->dims[1] : cfg->vocab_size);
 
-    int is_mmap_mode = (!strcmp(io_mode_str, "mmap"));
+    if (!strcmp(io_mode_str, "mmap") || pin_weights) {
+        is_mmap_mode = 1;
+    }
     const uint8_t *g_mmap_full = NULL;
     size_t g_mmap_full_size = 0;
     const uint8_t *mmap_output_weight = NULL;
@@ -889,15 +909,31 @@ int main(int argc, char **argv) {
         off_t fsz = lseek(fd, 0, SEEK_END);
         lseek(fd, 0, SEEK_SET);
         g_mmap_full_size = fsz;
+
+        uint64_t avail_ram = get_available_memory_bytes();
+        if (avail_ram > 0 && (uint64_t)fsz > (avail_ram / 2)) {
+            if (!quiet) fprintf(stderr, "\033[1;33m[WARN]\033[0m Model is large. Pinning weights may cause Out-Of-Memory (OOM).\n");
+        }
+
         void *map_ptr = mmap(NULL, g_mmap_full_size, PROT_READ, MAP_SHARED, fd, 0);
         if (map_ptr == MAP_FAILED) {
             fprintf(stderr, "Error: Failed to mmap full model file of size %llu bytes\n", (unsigned long long)fsz);
             return 1;
         }
         g_mmap_full = (const uint8_t *)map_ptr;
-        madvise((void*)g_mmap_full, g_mmap_full_size, MADV_SEQUENTIAL);
-        if (!quiet) fprintf(stderr, "[INFO] Memory-mapped FULL model file (%.2f MB)\n", (double)g_mmap_full_size / (1024*1024));
         mmap_output_weight = g_mmap_full + ti_outw->absolute_offset;
+
+        if (pin_weights) {
+            if (mlock((void*)g_mmap_full, g_mmap_full_size) == 0) {
+                if (!quiet) fprintf(stderr, "\033[1;36m[INFO]\033[0m Pinned full model into RAM via mlock (%.2f MB).\n", (double)g_mmap_full_size / (1024*1024));
+            } else {
+                if (!quiet) fprintf(stderr, "\033[1;33m[WARN]\033[0m mlock failed, falling back to madvise. OS may still page out weights.\n");
+                madvise((void*)g_mmap_full, g_mmap_full_size, MADV_WILLNEED);
+            }
+        } else {
+            madvise((void*)g_mmap_full, g_mmap_full_size, MADV_SEQUENTIAL);
+            if (!quiet) fprintf(stderr, "\033[1;36m[INFO]\033[0m Memory-mapped FULL model file (%.2f MB)\n", (double)g_mmap_full_size / (1024*1024));
+        }
     } else if (ti_outw) {
         long page_size = sysconf(_SC_PAGESIZE);
         if (page_size <= 0) page_size = 4096;
@@ -1172,6 +1208,7 @@ int main(int argc, char **argv) {
     ════════════════════════════════════════════════════════════════════════ */
     int *gen_tokens = malloc(max_tokens * sizeof(int));
     int  gen_count  = 0;
+    uint64_t decode_start_bytes_read = bytes_read;
     double t_gen_start = get_time_ms();
 
     long cur_rss = read_rss_mb();
@@ -1218,15 +1255,22 @@ int main(int argc, char **argv) {
         /* Embedding for next_tok */
         {
             double t0 = get_time_ms();
-            uint8_t *row_buf = malloc(embed_row_bytes);
-            if (exact_pread(fd, row_buf, embed_row_bytes,
-                            ti_emb->absolute_offset + (uint64_t)next_tok * embed_row_bytes)
-                < (ssize_t)embed_row_bytes) { free(row_buf); return 1; }
+            const uint8_t *row_ptr = NULL;
+            uint8_t *row_buf = NULL;
+            if (g_mmap_full) {
+                row_ptr = g_mmap_full + ti_emb->absolute_offset + (uint64_t)next_tok * embed_row_bytes;
+            } else {
+                row_buf = malloc(embed_row_bytes);
+                if (exact_pread(fd, row_buf, embed_row_bytes,
+                                ti_emb->absolute_offset + (uint64_t)next_tok * embed_row_bytes)
+                    < (ssize_t)embed_row_bytes) { free(row_buf); return 1; }
+                row_ptr = row_buf;
+                bytes_read += embed_row_bytes;
+            }
             double t1 = get_time_ms();
             tok_io_ms += (t1 - t0);
-            bytes_read += embed_row_bytes;
-            dequantize_row(row_buf, hidden_single, cfg->hidden_dim, ti_emb->type);
-            free(row_buf);
+            dequantize_row(row_ptr, hidden_single, cfg->hidden_dim, ti_emb->type);
+            if (row_buf) free(row_buf);
             if (emb_scale != 1.0f) {
                 for (int i = 0; i < cfg->hidden_dim; i++) hidden_single[i] *= emb_scale;
             }
@@ -1515,7 +1559,9 @@ int main(int argc, char **argv) {
     }
 
     if (!quiet) {
+        uint64_t decode_bytes_read = (bytes_read >= decode_start_bytes_read) ? (bytes_read - decode_start_bytes_read) : 0;
         fprintf(stderr, "\n=== Execution Summary ===\n");
+        fprintf(stderr, "Weights Mode   : %s\n", pin_weights ? "Pinned in RAM (Zero Decode I/O)" : (is_mmap_mode ? "Memory Mapped" : "Disk Streaming"));
         fprintf(stderr, "Prompt tokens  : %d\n", prompt_len);
 
         if (g_tok) {
@@ -1549,11 +1595,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Gen speed      : %.2f ms/tok\n",
                    (t_gen_end - t_gen_start) / gen_count);
         if (bytes_read >= (1024ULL * 1024ULL * 1024ULL)) {
-            fprintf(stderr, "Bytes read     : %.2f GB (%llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0 * 1024.0), (unsigned long long)bytes_read);
+            fprintf(stderr, "Bytes read     : %.2f GB (%llu bytes, Decode: %llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0 * 1024.0), (unsigned long long)bytes_read, (unsigned long long)decode_bytes_read);
         } else if (bytes_read >= (1024ULL * 1024ULL)) {
-            fprintf(stderr, "Bytes read     : %.2f MB (%llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0), (unsigned long long)bytes_read);
+            fprintf(stderr, "Bytes read     : %.2f MB (%llu bytes, Decode: %llu bytes)\n", (double)bytes_read / (1024.0 * 1024.0), (unsigned long long)bytes_read, (unsigned long long)decode_bytes_read);
         } else {
-            fprintf(stderr, "Bytes read     : %llu bytes\n", (unsigned long long)bytes_read);
+            fprintf(stderr, "Bytes read     : %llu bytes (Decode: %llu bytes)\n", (unsigned long long)bytes_read, (unsigned long long)decode_bytes_read);
         }
         fprintf(stderr, "Peak RSS       : %ld MB\n", peak_rss);
     }
