@@ -1,4 +1,4 @@
-INCLUDES = -Iinclude
+INCLUDES = -Iinclude -Iinclude/arch
 DEFINES  = -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
 
 UNAME_M := $(shell uname -m)
@@ -15,9 +15,12 @@ LFLAGS = -lm -lpthread -lvulkan
 SRCS_CORE = src/attention.c src/ssm.c src/dequant.c src/rmsnorm.c \
             src/swiglu.c src/matvec.c src/state.c src/scratch.c \
             src/tensor_catalog.c src/layer_map.c src/sampler.c src/stream.c \
-            src/tokenizer.c src/speculative.c src/vulkan_backend.c
+            src/tokenizer.c src/speculative.c src/vulkan_backend.c \
+            src/core/model.c src/core/context.c src/core/tokenizer_api.c src/core/sampler_api.c \
+            src/core/arch/registry.c src/core/arch/qwen.c src/core/arch/llama.c \
+            src/core/arch/phi3.c src/core/arch/gemma.c src/core/arch/mistral.c
 
-all: shaders gguf_dump tensor_map probe_model bench_stream test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm
+all: shaders gguf_dump tensor_map probe_model bench_stream test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm-cli diskllm-server diskllm
 
 shaders: shaders/matvec_q8_0.spv shaders/matvec_q4_k.spv shaders/matvec_f32.spv
 
@@ -51,13 +54,16 @@ test_ssm: tools/test_ssm.c src/ssm.c src/dequant.c src/rmsnorm.c src/swiglu.c sr
 test_tokenizer: tools/test_tokenizer.c src/tokenizer.c
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
-test_speculative: tools/test_speculative.c src/speculative.c src/tensor_catalog.c src/layer_map.c src/dequant.c src/rmsnorm.c src/swiglu.c src/matvec.c src/scratch.c src/vulkan_backend.c
+diskllm-cli: src/cli/main.c $(SRCS_CORE)
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
-diskllm: main/diskllm.c $(SRCS_CORE)
+diskllm-server: src/server/main.c src/server/cJSON.c $(SRCS_CORE)
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+diskllm: diskllm-cli
+	cp diskllm-cli diskllm
 
 clean:
 	rm -f gguf_dump tensor_map probe_model bench_stream \
-	      test_dequant test_kernels test_attention test_ssm test_tokenizer test_speculative diskllm
-
+	      test_dequant test_kernels test_attention test_ssm test_tokenizer test_speculative \
+	      diskllm diskllm-cli diskllm-server

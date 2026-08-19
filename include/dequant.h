@@ -104,4 +104,15 @@ void dequantize_q4_K(const void * restrict x, float * restrict y, int k);
 void dequantize_q5_K(const void * restrict x, float * restrict y, int k);
 void dequantize_q6_K(const void * restrict x, float * restrict y, int k);
 
+static inline void dequantize_row(float * restrict dest, const void * restrict src, int k, int type) {
+    switch (type) {
+        case 0:  dequantize_f32(src, dest, k); break;
+        case 8:  dequantize_q8_0(src, dest, k); break;
+        case 12: dequantize_q4_K(src, dest, k); break;
+        case 13: dequantize_q5_K(src, dest, k); break;
+        case 14: dequantize_q6_K(src, dest, k); break;
+        default: dequantize_q4_K(src, dest, k); break;
+    }
+}
+
 #endif // DEQUANT_H
