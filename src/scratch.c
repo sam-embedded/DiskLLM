@@ -52,7 +52,7 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     int ssm_conv_dim = ssm_inner + 2 * (ssm_group_count * ssm_state_size);
 
     // Compute maximum size required for each activation buffer across Attention and SSM layers
-    int ffn_gate_alloc_dim = max_int(ffn_dim, ssm_conv_dim);
+    int ffn_gate_alloc_dim = max_int(2 * ffn_dim, ssm_conv_dim);
     ffn_gate_alloc_dim = max_int(ffn_gate_alloc_dim, ssm_inner + ssm_rank * ssm_state_size);
     ffn_gate_alloc_dim = max_int(ffn_gate_alloc_dim, attn_out_dim);
 
@@ -60,10 +60,14 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     ffn_up_alloc_dim = max_int(ffn_up_alloc_dim, 8192); // context length headroom
 
     int attn_q_alloc_dim = max_int(q_total_dim, ssm_inner);
+    attn_q_alloc_dim = max_int(attn_q_alloc_dim, 8192);
+
     int attn_kv_alloc_dim = max_int(kv_total_dim, 2 * ssm_rank);
+    attn_kv_alloc_dim = max_int(attn_kv_alloc_dim, 8192);
 
     int ssm_qkv_alloc_dim = max_int(ssm_conv_dim, ffn_dim);
     ssm_qkv_alloc_dim = max_int(ssm_qkv_alloc_dim, vocab_size);
+    ssm_qkv_alloc_dim = max_int(ssm_qkv_alloc_dim, 8192);
 
     #define ALLOC_ALIGNED_FLOAT(ptr, count) do { \
         ret = posix_memalign((void **)&scratch->ptr, 64, (size_t)(count) * sizeof(float)); \
@@ -82,6 +86,11 @@ scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg) {
     ALLOC_ALIGNED_FLOAT(attn_kv, attn_kv_alloc_dim);
     ALLOC_ALIGNED_FLOAT(ssm_qkv, ssm_qkv_alloc_dim);
     ALLOC_ALIGNED_FLOAT(logits, vocab_size);
+    ALLOC_ALIGNED_FLOAT(ple_gate, 256);
+    ALLOC_ALIGNED_FLOAT(ple_mult, 256);
+    ALLOC_ALIGNED_FLOAT(ple_out, hidden_dim);
+    ALLOC_ALIGNED_FLOAT(ple_proj_buf, 32768);
+    ALLOC_ALIGNED_FLOAT(ple_token_buf, 32768);
 
     #undef ALLOC_ALIGNED_FLOAT
 
@@ -98,5 +107,10 @@ void free_scratch_buffers(scratch_buffers *scratch) {
     if (scratch->attn_kv) free(scratch->attn_kv);
     if (scratch->ssm_qkv) free(scratch->ssm_qkv);
     if (scratch->logits) free(scratch->logits);
+    if (scratch->ple_gate) free(scratch->ple_gate);
+    if (scratch->ple_mult) free(scratch->ple_mult);
+    if (scratch->ple_out) free(scratch->ple_out);
+    if (scratch->ple_proj_buf) free(scratch->ple_proj_buf);
+    if (scratch->ple_token_buf) free(scratch->ple_token_buf);
     free(scratch);
 }

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 
 #ifndef M_PI
@@ -182,16 +183,19 @@ static inline void add_v_scaled(float * restrict out_head, const void * restrict
     }
 }
 
-static void apply_rope(float * restrict vec, int pos, double freq_base, int rope_dim, const qwen_model_config *cfg) {
+static void apply_rope(float * restrict vec, int pos, double freq_base, int rope_dim, const float *rope_freqs, const qwen_model_config *cfg) {
     int half_dim = rope_dim / 2;
     double scaling_factor = (cfg && cfg->rope_scaling_factor > 1.0f) ? (double)cfg->rope_scaling_factor : 1.0;
     int orig_len = (cfg && cfg->rope_orig_context_len > 0) ? cfg->rope_orig_context_len : 4096;
     int scaling_type = cfg ? (int)cfg->rope_scaling_type : 0;
 
-    int is_neox = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
+    int is_neox = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY || cfg->model_type == MODEL_TYPE_PHI3 || cfg->model_type == MODEL_TYPE_GEMMA || cfg->model_type == MODEL_TYPE_GEMMA2 || cfg->model_type == MODEL_TYPE_GEMMA3 || cfg->model_type == MODEL_TYPE_GEMMA4));
 
     for (int i = 0; i < half_dim; i++) {
         double freq = 1.0 / pow(freq_base, (double)(2 * i) / rope_dim);
+        if (rope_freqs) {
+            freq /= (double)rope_freqs[i];
+        }
         double theta = (double)pos * freq;
 
         if (scaling_type == ROPE_SCALING_LINEAR && scaling_factor > 1.0) {
@@ -237,25 +241,33 @@ void attention_forward(
     int hidden_dim     = cfg ? cfg->hidden_dim : 5120;
     int num_attn_heads = cfg ? cfg->num_attn_heads : 24;
     int num_kv_heads   = cfg ? cfg->num_kv_heads : 4;
-    int head_dim       = cfg ? cfg->key_length : 256;
+    int is_phi3 = (cfg && cfg->model_type == MODEL_TYPE_PHI3);
+    int is_qwen_hybrid = (cfg && cfg->model_type == MODEL_TYPE_QWEN_HYBRID);
+
+    int head_dim = cfg ? cfg->key_length : 256;
     if (weights && weights->q_total_dim > 0 && num_attn_heads > 0) {
-        head_dim = weights->q_total_dim / num_attn_heads;
+        head_dim = weights->q_total_dim / (num_attn_heads * (is_qwen_hybrid ? 2 : 1));
     }
     double freq_base   = cfg ? (double)cfg->rope_freq_base : 10000000.0;
+    if (cfg && cfg->model_type == MODEL_TYPE_GEMMA4) {
+        if (head_dim <= 256) {
+            freq_base = 10000.0;
+        } else {
+            freq_base = 1000000.0;
+        }
+    }
     int rope_dim       = cfg ? cfg->rope_dim : head_dim;
     if (rope_dim > head_dim) rope_dim = head_dim;
 
-    int is_phi3 = (cfg && cfg->model_type == MODEL_TYPE_PHI3);
-    int is_qwen = (cfg && (cfg->model_type == MODEL_TYPE_QWEN_HYBRID || cfg->model_type == MODEL_TYPE_QWEN_ATTENTION_ONLY));
-    int q_dim_per_head = is_qwen ? (head_dim * 2) : head_dim;
-    int q_total_dim    = num_attn_heads * q_dim_per_head;
-    int k_total_dim    = num_kv_heads * head_dim;
-    int v_total_dim    = num_kv_heads * head_dim;
+    int q_dim_per_head = is_qwen_hybrid ? (head_dim * 2) : head_dim;
+    int q_total_dim    = (weights && weights->q_total_dim > 0) ? weights->q_total_dim : (num_attn_heads * q_dim_per_head);
+    int k_total_dim    = (weights && weights->k_total_dim > 0) ? weights->k_total_dim : (num_kv_heads * head_dim);
+    int v_total_dim    = (weights && weights->v_total_dim > 0) ? weights->v_total_dim : (num_kv_heads * head_dim);
     int attn_out_dim   = (weights && weights->attn_out_dim > 0) ? weights->attn_out_dim : (num_attn_heads * head_dim);
     int group_size     = num_attn_heads / (num_kv_heads > 0 ? num_kv_heads : 1);
 
     /* Step 1: Input RMSNorm */
-    int add_one = (cfg && cfg->model_type == MODEL_TYPE_GEMMA) ? 1 : 0;
+    int add_one = 0;
     rmsnorm_ext(scratch->hidden_state, hidden_state, weights->attn_norm_w, hidden_dim, 1e-6f, add_one);
 
     /* Step 2: Projections */
@@ -271,7 +283,7 @@ void attention_forward(
             hidden_dim,
             fused_qkv_dim,
             weights->attn_qkv_w_type,
-            scratch->ssm_qkv + fused_qkv_dim * sizeof(float)
+            scratch->ssm_qkv + fused_qkv_dim
         );
         /* Split: Q first, then K, then V */
         memcpy(scratch->attn_q,  fused_buf,                       q_total_dim * sizeof(float));
@@ -280,11 +292,11 @@ void attention_forward(
         /* Step 2.4 Apply RoPE (neox style for Phi-3) */
         for (int h_q = 0; h_q < num_attn_heads; h_q++) {
             float *q_head = scratch->attn_q + h_q * q_dim_per_head;
-            apply_rope(q_head, pos, freq_base, rope_dim, cfg);
+            apply_rope(q_head, pos, freq_base, rope_dim, weights ? weights->rope_freqs : NULL, cfg);
         }
         for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
             float *k_head = scratch->attn_kv + h_kv * head_dim;
-            apply_rope(k_head, pos, freq_base, rope_dim, cfg);
+            apply_rope(k_head, pos, freq_base, rope_dim, weights ? weights->rope_freqs : NULL, cfg);
         }
 
         int cache_layer_idx_f = state->layer_to_attn_idx[layer_idx];
@@ -305,7 +317,14 @@ void attention_forward(
         float *scores_f   = scratch->ffn_up;
         float scale_f = 1.0f / sqrtf((float)head_dim);
         float softcap_f = (cfg ? cfg->attn_logit_softcapping : 0.0f);
-        size_t head_k_bytes_f = vec_bytes_f / (num_kv_heads > 0 ? num_kv_heads : 1);
+        size_t head_k_bytes_f = 0;
+        if (ctype_f == CACHE_TYPE_Q8_0) {
+            head_k_bytes_f = ((size_t)head_dim / 32) * 34;
+        } else if (ctype_f == CACHE_TYPE_Q4_0) {
+            head_k_bytes_f = ((size_t)head_dim / 32) * 18;
+        } else {
+            head_k_bytes_f = (size_t)head_dim * sizeof(uint16_t);
+        }
         size_t head_v_bytes_f = head_k_bytes_f;
 
         for (int h_q = 0; h_q < num_attn_heads; h_q++) {
@@ -318,12 +337,18 @@ void attention_forward(
                 if (softcap_f > 0.0f) score = softcap_f * tanhf(score / softcap_f);
                 scores_f[p] = score;
             }
-            float max_s = scores_f[0];
-            for (int p = 1; p <= pos; p++) if (scores_f[p] > max_s) max_s = scores_f[p];
-            double sum_e = 0.0;
-            for (int p = 0; p <= pos; p++) { scores_f[p] = expf(scores_f[p] - max_s); sum_e += scores_f[p]; }
-            float inv_s = (float)(1.0 / sum_e);
-            for (int p = 0; p <= pos; p++) scores_f[p] *= inv_s;
+            float max_score_f = scores_f[0];
+            for (int p = 1; p <= pos; p++) {
+                if (scores_f[p] > max_score_f) max_score_f = scores_f[p];
+            }
+            double sum_exp_f = 0.0;
+            for (int p = 0; p <= pos; p++) {
+                scores_f[p] = expf(scores_f[p] - max_score_f);
+                sum_exp_f += (double)scores_f[p];
+            }
+            float inv_sum_f = (float)(1.0 / sum_exp_f);
+            for (int p = 0; p <= pos; p++) scores_f[p] *= inv_sum_f;
+
             float *out_head_f = attn_out_f + h_q * head_dim;
             memset(out_head_f, 0, head_dim * sizeof(float));
             for (int p = 0; p <= pos; p++) {
@@ -356,40 +381,8 @@ void attention_forward(
         weights->attn_q_w_type,
         scratch->ssm_qkv
     );
-
-    /* 2.2 Project Key */
-    matvec(
-        scratch->attn_kv,
-        weights->attn_k_w,
-        scratch->hidden_state,
-        hidden_dim,
-        k_total_dim,
-        weights->attn_k_w_type,
-        scratch->ssm_qkv
-    );
-
-    /* 2.3 Apply QK-Norm to Q and K (BEFORE RoPE) */
-    if (weights->attn_q_norm_w) {
-        for (int h_q = 0; h_q < num_attn_heads; h_q++) {
-            float *q_head = scratch->attn_q + h_q * q_dim_per_head;
-            rmsnorm_ext(q_head, q_head, weights->attn_q_norm_w, head_dim, 1e-6f, add_one);
-        }
-    }
-    if (weights->attn_k_norm_w) {
-        for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
-            float *k_head = scratch->attn_kv + h_kv * head_dim;
-            rmsnorm_ext(k_head, k_head, weights->attn_k_norm_w, head_dim, 1e-6f, add_one);
-        }
-    }
-
-    /* 2.4 Apply RoPE to Q and K */
-    for (int h_q = 0; h_q < num_attn_heads; h_q++) {
-        float *q_head = scratch->attn_q + h_q * q_dim_per_head;
-        apply_rope(q_head, pos, freq_base, rope_dim, cfg);
-    }
-    for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
-        float *k_head = scratch->attn_kv + h_kv * head_dim;
-        apply_rope(k_head, pos, freq_base, rope_dim, cfg);
+    if (weights->attn_q_b) {
+        for (int i = 0; i < q_total_dim; i++) scratch->attn_q[i] += weights->attn_q_b[i];
     }
 
     int cache_layer_idx = state->layer_to_attn_idx[layer_idx];
@@ -398,34 +391,84 @@ void attention_forward(
     cache_type_t ctype = state->cache_type;
     size_t kv_token_bytes = state->kv_token_bytes;
     size_t vec_bytes = kv_token_bytes / 2;
-    size_t head_k_bytes = vec_bytes / (num_kv_heads > 0 ? num_kv_heads : 1);
+    size_t head_k_bytes = 0;
+    if (ctype == CACHE_TYPE_Q8_0) {
+        head_k_bytes = ((size_t)head_dim / 32) * 34;
+    } else if (ctype == CACHE_TYPE_Q4_0) {
+        head_k_bytes = ((size_t)head_dim / 32) * 18;
+    } else {
+        head_k_bytes = (size_t)head_dim * sizeof(uint16_t);
+    }
     size_t head_v_bytes = head_k_bytes;
 
     uint8_t *layer_cache = (uint8_t *)state->kv_cache + (size_t)cache_layer_idx * (size_t)state->context_length * kv_token_bytes;
-    uint8_t *cache_k = layer_cache + (size_t)pos * kv_token_bytes;
-    uint8_t *cache_v = cache_k + vec_bytes;
 
-    /* 2.5 Store Key in the KV Cache */
-    store_kv_vector(cache_k, scratch->attn_kv, k_total_dim, ctype);
+    /* 2.2 Project Key & Value if present (non-shared KV layers) */
+    if (weights->attn_k_w) {
+        matvec(
+            scratch->attn_kv,
+            weights->attn_k_w,
+            scratch->hidden_state,
+            hidden_dim,
+            k_total_dim,
+            weights->attn_k_w_type,
+            scratch->ssm_qkv
+        );
+        if (weights->attn_k_b) {
+            for (int i = 0; i < k_total_dim; i++) scratch->attn_kv[i] += weights->attn_k_b[i];
+        }
 
-    /* 2.6 Project Value */
-    matvec(
-        scratch->attn_kv,
-        weights->attn_v_w,
-        scratch->hidden_state,
-        hidden_dim,
-        v_total_dim,
-        weights->attn_v_w_type,
-        scratch->ssm_qkv
-    );
+        /* 2.3 Apply QK-Norm to K (BEFORE RoPE) */
+        if (weights->attn_k_norm_w) {
+            for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
+                float *k_head = scratch->attn_kv + h_kv * head_dim;
+                rmsnorm_ext(k_head, k_head, weights->attn_k_norm_w, head_dim, 1e-6f, add_one);
+            }
+        }
 
-    /* 2.7 Store Value in the KV Cache */
-    store_kv_vector(cache_v, scratch->attn_kv, v_total_dim, ctype);
+        /* 2.4 Apply RoPE to K */
+        for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
+            float *k_head = scratch->attn_kv + h_kv * head_dim;
+            apply_rope(k_head, pos, freq_base, rope_dim, weights ? weights->rope_freqs : NULL, cfg);
+        }
+
+        uint8_t *cache_k = layer_cache + (size_t)pos * kv_token_bytes;
+        uint8_t *cache_v = cache_k + vec_bytes;
+
+        /* 2.5 Store Key in the KV Cache */
+        store_kv_vector(cache_k, scratch->attn_kv, k_total_dim, ctype);
+
+        /* 2.6 Project Value */
+        const void *v_w = weights->attn_v_w ? weights->attn_v_w : weights->attn_k_w;
+        int v_w_type = weights->attn_v_w ? weights->attn_v_w_type : weights->attn_k_w_type;
+        matvec(
+            scratch->attn_kv,
+            v_w,
+            scratch->hidden_state,
+            hidden_dim,
+            v_total_dim,
+            v_w_type,
+            scratch->ssm_qkv
+        );
+        if (weights->attn_v_b) {
+            for (int i = 0; i < v_total_dim; i++) scratch->attn_kv[i] += weights->attn_v_b[i];
+        }
+
+        if (cfg && cfg->model_type == MODEL_TYPE_GEMMA4) {
+            for (int h_kv = 0; h_kv < num_kv_heads; h_kv++) {
+                float *v_head = scratch->attn_kv + h_kv * head_dim;
+                rmsnorm_ext(v_head, v_head, NULL, head_dim, 1e-6f, 0);
+            }
+        }
+
+        /* 2.7 Store Value in the KV Cache */
+        store_kv_vector(cache_v, scratch->attn_kv, v_total_dim, ctype);
+    }
 
     /* Step 3: Attention Computation (Grouped-Query Attention) */
     float *attn_out = scratch->ffn_gate;
     float *scores = scratch->ffn_up;
-    float scale = 1.0f / sqrtf((float)head_dim);
+    float scale = (cfg && cfg->model_type == MODEL_TYPE_GEMMA4) ? 1.0f : (1.0f / sqrtf((float)head_dim));
     if (cfg && cfg->rope_scaling_type == ROPE_SCALING_YARN && cfg->rope_scaling_factor > 1.0f) {
         float yarn_attn_scale = (cfg->rope_attn_factor > 0.0f) ? cfg->rope_attn_factor : (0.1f * logf(cfg->rope_scaling_factor) + 1.0f);
         scale *= yarn_attn_scale;
@@ -475,7 +518,7 @@ void attention_forward(
             add_v_scaled(out_head, v_head_ptr, prob, head_dim, ctype);
         }
 
-        if (is_qwen) {
+        if (is_qwen_hybrid) {
             const float *gate_head = q_head + head_dim;
             for (int j = 0; j < head_dim; j++) {
                 float sig_gate = 1.0f / (1.0f + expf(-gate_head[j]));
@@ -494,6 +537,10 @@ void attention_forward(
         weights->attn_output_w_type,
         scratch->ssm_qkv
     );
+
+    if (weights->post_attn_norm_w) {
+        rmsnorm_ext(scratch->hidden_state, scratch->hidden_state, weights->post_attn_norm_w, hidden_dim, 1e-6f, add_one);
+    }
 
     /* Step 5: Residual Connection */
     add_residual(hidden_state, hidden_state, scratch->hidden_state, hidden_dim);

@@ -29,6 +29,17 @@ It enables executing large language models—ranging from **1B to 27B+ parameter
 
 ---
 
+## 🧠 Supported Architectures
+
+DiskLLM dynamically detects and supports multiple model families without recompilation:
+- **Qwen 3.5 Hybrid** (SSM/Attention, Query Gating, NeoX RoPE)
+- **Qwen 2.5 / 2** (Pure Attention, Optional Q/K/V Bias)
+- **Llama 3 / 3.2** (Pure Attention, Consecutive RoPE, GQA)
+- **Mistral 7B** (Pure Attention, GQA)
+- **Phi-3 Mini** (Fused QKV, Packed SwiGLU)
+
+---
+
 ## Hardware Reality & Storage Bandwidth Boundedness
 
 In a low-RAM environment where system memory is smaller than the model file size, model weight pages cannot remain cached in RAM across autoregressive decode steps. Consequently, weights are streamed from flash storage on every generated token.
@@ -126,11 +137,13 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 | Architecture | GGUF Arch String | Models Tested | Key Features |
 | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 / 3.5** | `qwen2`, `qwen35` | Qwen 27B, 3B, 0.5B | Hybrid Mamba/SSM + Attention, QK-Norm |
-| **Llama 3 / 3.2** | `llama` | Llama-3.2-1B-Instruct | GQA, SwiGLU, RMSNorm |
-| **Microsoft Phi-3** | `phi3` | Phi-3-mini-4k-instruct | Fused QKV tensor, packed SwiGLU |
+| **Qwen 2.5 / 3.5** | `qwen2`, `qwen35` | Qwen 27B, 3B, 0.5B, 0.8B | Hybrid Mamba/SSM + Attention, QK-Norm |
+| **Llama 3 / 3.2** | `llama` | Llama-3.2-1B, Llama-3.2-3B | GQA, SwiGLU, RMSNorm |
+| **Microsoft Phi-3 / 4** | `phi3` | Phi-3-mini, Phi-4-mini | Fused QKV tensor, packed SwiGLU |
 | **Mistral** | `mistral` | Mistral-7B-v0.1 | Sliding Window Attention, GQA |
-| **Gemma / Gemma 2**| `gemma`, `gemma2` | Gemma-2B-it | GeGLU activations, RMSNorm $+1$ |
+| **Gemma 1 / 2** | `gemma`, `gemma2` | Gemma-2B-it | GeGLU activations, RMSNorm $+1$, Post-Attn/FFW Norm |
+| **Gemma 3** | `gemma3` | Gemma-3-1B-it | QK-Norm before RoPE, Post-Norms, GeGLU |
+| **Gemma 4** | `gemma4` | Gemma-4-E4B-it | Shared KV Cache (18 layers), V-RMSNorm, PLE (Laurel), Unscaled Attn |
 
 ---
 

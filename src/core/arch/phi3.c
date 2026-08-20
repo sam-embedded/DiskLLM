@@ -4,10 +4,16 @@
 #include "kernels.h"
 
 typedef struct {
+    const float *ffn_norm_w;
     const float *post_attn_norm_w;
+    const float *post_ffw_norm_w;
     const void  *ffn_gate_w; int ffn_gate_w_type;
     const void  *ffn_up_w;   int ffn_up_w_type;
     const void  *ffn_down_w; int ffn_down_w_type;
+    const void  *inp_gate_w; int inp_gate_w_type;
+    const void  *proj_w;     int proj_w_type;
+    const float *post_norm_w;
+    const float *layer_output_scale;
     layer_type   l_type;
     union {
         attention_layer_weights attn;
@@ -30,7 +36,7 @@ static bool phi3_prefill_layer(diskllm_context *ctx, int layer_idx, const void *
         float *h = hidden_states + pos * cfg->hidden_dim;
         attention_forward(h, pos, layer_idx, &blk->u.attn, state, scratch, cfg);
 
-        rmsnorm_ext(scratch->hidden_state, h, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, 0);
+        rmsnorm_ext(scratch->hidden_state, h, blk->ffn_norm_w, cfg->hidden_dim, 1e-6f, 0);
         /* Phi-3: ffn_up stores [gate | up] packed as 2*ffn_dim rows */
         matvec(scratch->ffn_gate, blk->ffn_up_w, scratch->hidden_state,
                cfg->hidden_dim, 2 * cfg->ffn_dim, blk->ffn_up_w_type, scratch->ssm_qkv);
@@ -53,7 +59,7 @@ static bool phi3_decode_layer(diskllm_context *ctx, int layer_idx, const void *l
 
     attention_forward(hidden_single, cur_pos, layer_idx, &blk->u.attn, state, scratch, cfg);
 
-    rmsnorm_ext(scratch->hidden_state, hidden_single, blk->post_attn_norm_w, cfg->hidden_dim, 1e-6f, 0);
+    rmsnorm_ext(scratch->hidden_state, hidden_single, blk->ffn_norm_w, cfg->hidden_dim, 1e-6f, 0);
     matvec(scratch->ffn_gate, blk->ffn_up_w, scratch->hidden_state,
            cfg->hidden_dim, 2 * cfg->ffn_dim, blk->ffn_up_w_type, scratch->ssm_qkv);
     memcpy(scratch->ffn_up, scratch->ffn_gate + cfg->ffn_dim, cfg->ffn_dim * sizeof(float));

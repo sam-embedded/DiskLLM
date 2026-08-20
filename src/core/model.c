@@ -36,6 +36,16 @@ uint64_t diskllm_get_available_memory_bytes(void) {
     return avail_kb * 1024ULL;
 }
 
+static ssize_t exact_pread(int fd, void *buf, size_t count, off_t offset) {
+    size_t total = 0;
+    while (total < count) {
+        ssize_t bytes = pread(fd, (char *)buf + total, count - total, offset + total);
+        if (bytes <= 0) return -1;
+        total += bytes;
+    }
+    return (ssize_t)total;
+}
+
 diskllm_model_params diskllm_model_params_default(void) {
     return (diskllm_model_params){
         .arch_flag = "auto",
@@ -157,7 +167,58 @@ diskllm_model *diskllm_model_load(const char *model_path, diskllm_model_params p
         }
     }
 
-    /* 6. Find Architecture Backend */
+    /* 6. Load Gemma 4 PLE tensors if present */
+    const tensor_info *ti_ple_emb = find_tensor(model->catalog, "per_layer_token_embd.weight");
+    const tensor_info *ti_ple_proj = find_tensor(model->catalog, "per_layer_model_proj.weight");
+    const tensor_info *ti_ple_norm = find_tensor(model->catalog, "per_layer_proj_norm.weight");
+    if (ti_ple_emb && ti_ple_proj && ti_ple_norm) {
+        model->n_embd_per_layer = (ti_ple_norm->dims[0] > 0) ? (int)ti_ple_norm->dims[0] : 256;
+        model->per_layer_token_embd_type = ti_ple_emb->type;
+        model->per_layer_token_embd_row_bytes = ti_ple_emb->byte_size / (ti_ple_emb->dims[1] > 0 ? ti_ple_emb->dims[1] : model->cfg->vocab_size);
+        model->per_layer_model_proj_type = ti_ple_proj->type;
+
+        if (model->g_mmap_full) {
+            model->per_layer_token_embd = model->g_mmap_full + ti_ple_emb->absolute_offset;
+            model->per_layer_model_proj = model->g_mmap_full + ti_ple_proj->absolute_offset;
+            model->per_layer_proj_norm = (const float *)(model->g_mmap_full + ti_ple_norm->absolute_offset);
+        } else {
+            int ple_fd = open(model_path, O_RDONLY);
+            if (ple_fd >= 0) {
+                void *p_emb = malloc(ti_ple_emb->byte_size);
+                void *p_proj = malloc(ti_ple_proj->byte_size);
+                void *p_norm = malloc(ti_ple_norm->byte_size);
+                if (p_emb && p_proj && p_norm) {
+                    exact_pread(ple_fd, p_emb, ti_ple_emb->byte_size, ti_ple_emb->absolute_offset);
+                    exact_pread(ple_fd, p_proj, ti_ple_proj->byte_size, ti_ple_proj->absolute_offset);
+                    exact_pread(ple_fd, p_norm, ti_ple_norm->byte_size, ti_ple_norm->absolute_offset);
+                    model->per_layer_token_embd = p_emb;
+                    model->per_layer_model_proj = p_proj;
+                    model->per_layer_proj_norm = (const float *)p_norm;
+                }
+                close(ple_fd);
+            }
+        }
+    }
+
+    /* 7. Load rope_freqs tensor if present */
+    const tensor_info *ti_rf = find_tensor(model->catalog, "rope_freqs.weight");
+    if (ti_rf) {
+        if (model->g_mmap_full) {
+            model->rope_freqs = (const float *)(model->g_mmap_full + ti_rf->absolute_offset);
+        } else {
+            int rfd = open(model_path, O_RDONLY);
+            if (rfd >= 0) {
+                float *rf = malloc(ti_rf->byte_size);
+                if (rf) {
+                    exact_pread(rfd, rf, ti_rf->byte_size, ti_rf->absolute_offset);
+                    model->rope_freqs = rf;
+                }
+                close(rfd);
+            }
+        }
+    }
+
+    /* 8. Find Architecture Backend */
     model->arch_backend = diskllm_arch_find(model->cfg->model_type);
     if (model->arch_backend && model->arch_backend->init) {
         model->arch_backend->init(model);
@@ -169,7 +230,12 @@ diskllm_model *diskllm_model_load(const char *model_path, diskllm_model_params p
 void diskllm_model_free(diskllm_model *model) {
     if (!model) return;
 
-    if (model->g_mmap_full) {
+    if (!model->g_mmap_full) {
+        if (model->per_layer_token_embd) free((void *)model->per_layer_token_embd);
+        if (model->per_layer_model_proj) free((void *)model->per_layer_model_proj);
+        if (model->per_layer_proj_norm) free((void *)model->per_layer_proj_norm);
+        if (model->rope_freqs) free((void *)model->rope_freqs);
+    } else {
         if (model->params.pin_weights) {
             munlock(model->g_mmap_full, model->g_mmap_full_size);
         }

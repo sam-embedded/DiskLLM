@@ -25,6 +25,12 @@ const diskllm_arch_backend *diskllm_arch_find(int model_type) {
             return &diskllm_arch_phi3;
         case MODEL_TYPE_GEMMA:
             return &diskllm_arch_gemma;
+        case MODEL_TYPE_GEMMA2:
+            return &diskllm_arch_gemma2;
+        case MODEL_TYPE_GEMMA3:
+            return &diskllm_arch_gemma3;
+        case MODEL_TYPE_GEMMA4:
+            return &diskllm_arch_gemma4;
         default:
             return &diskllm_arch_qwen;
     }

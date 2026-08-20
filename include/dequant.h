@@ -9,6 +9,27 @@
 #define K_SCALE_SIZE 12
 #define QK8_0 32
 
+#define GGML_TYPE_F32  0
+#define GGML_TYPE_F16  1
+#define GGML_TYPE_Q4_0 2
+#define GGML_TYPE_Q4_1 3
+#define GGML_TYPE_Q5_0 6
+#define GGML_TYPE_Q5_1 7
+#define GGML_TYPE_Q8_0 8
+#define GGML_TYPE_Q4_K 12
+#define GGML_TYPE_Q5_K 13
+#define GGML_TYPE_Q6_K 14
+#define GGML_TYPE_BF16 30
+
+static inline float bf16_to_fp32(uint16_t h) {
+    union {
+        uint32_t u;
+        float f;
+    } val;
+    val.u = ((uint32_t)h) << 16;
+    return val.f;
+}
+
 // 4-bit quantization super-block
 typedef struct {
     uint16_t d;    // super-block scale for quantized scales (FP16 representation)
@@ -45,6 +66,13 @@ typedef struct {
     uint16_t d;       // delta scale (FP16 representation)
     uint8_t qs[16];   // 4-bit quants (16 bytes = 32 values)
 } block_q4_0;
+
+// 5-bit quantization block (standard 0-type)
+typedef struct {
+    uint16_t d;       // delta scale (FP16 representation)
+    uint8_t qh[4];    // 5th bit
+    uint8_t qs[16];   // 4-bit quants
+} block_q5_0;
 
 // Helper to convert float bits to float value
 static inline float fp32_from_bits(uint32_t w) {
@@ -100,6 +128,8 @@ static inline void get_scale_min_k4(int j, const uint8_t * restrict q, uint8_t *
 // Dequantization function signatures
 void dequantize_f32(const void * restrict x, float * restrict y, int k);
 void dequantize_q8_0(const void * restrict x, float * restrict y, int k);
+void dequantize_q4_0(const void * restrict x, float * restrict y, int k);
+void dequantize_q5_0(const void * restrict x, float * restrict y, int k);
 void dequantize_q4_K(const void * restrict x, float * restrict y, int k);
 void dequantize_q5_K(const void * restrict x, float * restrict y, int k);
 void dequantize_q6_K(const void * restrict x, float * restrict y, int k);
@@ -107,10 +137,14 @@ void dequantize_q6_K(const void * restrict x, float * restrict y, int k);
 static inline void dequantize_row(float * restrict dest, const void * restrict src, int k, int type) {
     switch (type) {
         case 0:  dequantize_f32(src, dest, k); break;
+        case 1:  { const uint16_t *s16 = (const uint16_t *)src; for (int i = 0; i < k; i++) dest[i] = fp16_to_fp32(s16[i]); break; }
+        case 2:  dequantize_q4_0(src, dest, k); break;
+        case 6:  dequantize_q5_0(src, dest, k); break;
         case 8:  dequantize_q8_0(src, dest, k); break;
         case 12: dequantize_q4_K(src, dest, k); break;
         case 13: dequantize_q5_K(src, dest, k); break;
         case 14: dequantize_q6_K(src, dest, k); break;
+        case 30: { const uint16_t *s16 = (const uint16_t *)src; for (int i = 0; i < k; i++) dest[i] = bf16_to_fp32(s16[i]); break; }
         default: dequantize_q4_K(src, dest, k); break;
     }
 }

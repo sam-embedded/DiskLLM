@@ -213,6 +213,38 @@ static inline double dot_q8_0(const block_q8_0 * restrict bx, const float * rest
 #endif
 }
 
+// ─── Q4_0 dot product ─────────────────────────────────────────────────────────
+
+static inline double dot_q4_0(const block_q4_0 * restrict bx, const float * restrict x) {
+    const float d = fp16_to_fp32(bx->d);
+    double sum = 0.0;
+    for (int j = 0; j < 16; j++) {
+        const uint8_t q = bx->qs[j];
+        const float x0 = (float)((int8_t)(q & 0xF) - 8);
+        const float x1 = (float)((int8_t)(q >> 4) - 8);
+        sum += (double)x[j] * x0 + (double)x[j + 16] * x1;
+    }
+    return sum * (double)d;
+}
+
+// ─── Q5_0 dot product ─────────────────────────────────────────────────────────
+
+static inline double dot_q5_0(const block_q5_0 * restrict bx, const float * restrict x) {
+    const float d = fp16_to_fp32(bx->d);
+    uint32_t qh;
+    memcpy(&qh, bx->qh, sizeof(qh));
+    double sum = 0.0;
+    for (int j = 0; j < 16; j++) {
+        const uint8_t q = bx->qs[j];
+        const uint8_t h0 = (qh >> (j + 0)) & 1;
+        const uint8_t h1 = (qh >> (j + 16)) & 1;
+        const float x0 = (float)((int8_t)((q & 0xF) | (h0 << 4)) - 16);
+        const float x1 = (float)((int8_t)((q >> 4)  | (h1 << 4)) - 16);
+        sum += (double)x[j] * x0 + (double)x[j + 16] * x1;
+    }
+    return sum * (double)d;
+}
+
 // ─── Multithreaded Row Compute Kernel ─────────────────────────────────────────
 
 static void compute_row_range(float * restrict out, const void * restrict w, const float * restrict x, int in_features, int r_start, int r_end, int type) {
@@ -231,6 +263,32 @@ static void compute_row_range(float * restrict out, const void * restrict w, con
 #else
             for (int j = 0; j < in_features; j++) sum += (double)row[j] * (double)x[j];
 #endif
+            out[i] = (float)sum;
+        }
+    } else if (type == GGML_TYPE_Q4_0) {
+        const block_q4_0 *bx = (const block_q4_0 *)w;
+        int blocks_per_row = in_features / 32;
+        for (int i = r_start; i < r_end; i++) {
+            double sum = 0.0;
+            const block_q4_0 *row_w = bx + i * blocks_per_row;
+            const float *row_x = x;
+            for (int j = 0; j < blocks_per_row; j++) {
+                sum += dot_q4_0(&row_w[j], row_x);
+                row_x += 32;
+            }
+            out[i] = (float)sum;
+        }
+    } else if (type == GGML_TYPE_Q5_0) {
+        const block_q5_0 *bx = (const block_q5_0 *)w;
+        int blocks_per_row = in_features / 32;
+        for (int i = r_start; i < r_end; i++) {
+            double sum = 0.0;
+            const block_q5_0 *row_w = bx + i * blocks_per_row;
+            const float *row_x = x;
+            for (int j = 0; j < blocks_per_row; j++) {
+                sum += dot_q5_0(&row_w[j], row_x);
+                row_x += 32;
+            }
             out[i] = (float)sum;
         }
     } else if (type == GGML_TYPE_Q4_K) {
@@ -282,6 +340,26 @@ static void compute_row_range(float * restrict out, const void * restrict w, con
             for (int j = 0; j < blocks_per_row; j++) {
                 sum += dot_q8_0(&row_w[j], row_x);
                 row_x += 32;
+            }
+            out[i] = (float)sum;
+        }
+    } else if (type == GGML_TYPE_BF16) {
+        const uint16_t *w_bf16 = (const uint16_t *)w;
+        for (int i = r_start; i < r_end; i++) {
+            const uint16_t *row = w_bf16 + i * in_features;
+            double sum = 0.0;
+            for (int j = 0; j < in_features; j++) {
+                sum += (double)bf16_to_fp32(row[j]) * (double)x[j];
+            }
+            out[i] = (float)sum;
+        }
+    } else if (type == GGML_TYPE_F16) {
+        const uint16_t *w_f16 = (const uint16_t *)w;
+        for (int i = r_start; i < r_end; i++) {
+            const uint16_t *row = w_f16 + i * in_features;
+            double sum = 0.0;
+            for (int j = 0; j < in_features; j++) {
+                sum += (double)fp16_to_fp32(row[j]) * (double)x[j];
             }
             out[i] = (float)sum;
         }

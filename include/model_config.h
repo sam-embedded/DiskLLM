@@ -13,7 +13,10 @@ typedef enum {
     MODEL_TYPE_MISTRAL = 3,
     MODEL_TYPE_GEMMA = 4,
     MODEL_TYPE_UNSUPPORTED = 5,
-    MODEL_TYPE_PHI3 = 6
+    MODEL_TYPE_PHI3 = 6,
+    MODEL_TYPE_GEMMA4 = 7,
+    MODEL_TYPE_GEMMA2 = 8,
+    MODEL_TYPE_GEMMA3 = 9
 } model_type_enum;
 
 typedef enum {

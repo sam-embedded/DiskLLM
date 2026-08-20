@@ -26,6 +26,46 @@ void dequantize_q8_0(const void * restrict x, float * restrict y, int k) {
     }
 }
 
+// Dequantize Q4_0
+void dequantize_q4_0(const void * restrict x, float * restrict y, int k) {
+    assert(k % 32 == 0);
+    const block_q4_0 *bx = (const block_q4_0 *)x;
+    const int nb = k / 32;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = fp16_to_fp32(bx[i].d);
+        for (int j = 0; j < 16; j++) {
+            const uint8_t q = bx[i].qs[j];
+            const int8_t x0 = (int8_t)(q & 0xF) - 8;
+            const int8_t x1 = (int8_t)(q >> 4) - 8;
+            y[i*32 + j]      = x0 * d;
+            y[i*32 + j + 16] = x1 * d;
+        }
+    }
+}
+
+// Dequantize Q5_0
+void dequantize_q5_0(const void * restrict x, float * restrict y, int k) {
+    assert(k % 32 == 0);
+    const block_q5_0 *bx = (const block_q5_0 *)x;
+    const int nb = k / 32;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = fp16_to_fp32(bx[i].d);
+        uint32_t qh;
+        memcpy(&qh, bx[i].qh, sizeof(qh));
+        for (int j = 0; j < 16; j++) {
+            const uint8_t q = bx[i].qs[j];
+            const uint8_t h0 = (qh >> (j + 0)) & 1;
+            const uint8_t h1 = (qh >> (j + 16)) & 1;
+            const int8_t x0 = (int8_t)((q & 0xF) | (h0 << 4)) - 16;
+            const int8_t x1 = (int8_t)((q >> 4)  | (h1 << 4)) - 16;
+            y[i*32 + j]      = x0 * d;
+            y[i*32 + j + 16] = x1 * d;
+        }
+    }
+}
+
 // Dequantize Q4_K
 void dequantize_q4_K(const void * restrict x, float * restrict y, int k) {
     assert(k % QK_K == 0);

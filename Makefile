@@ -18,7 +18,7 @@ SRCS_CORE = src/attention.c src/ssm.c src/dequant.c src/rmsnorm.c \
             src/tokenizer.c src/speculative.c src/vulkan_backend.c \
             src/core/model.c src/core/context.c src/core/tokenizer_api.c src/core/sampler_api.c \
             src/core/arch/registry.c src/core/arch/qwen.c src/core/arch/llama.c \
-            src/core/arch/phi3.c src/core/arch/gemma.c src/core/arch/mistral.c
+            src/core/arch/phi3.c src/core/arch/gemma.c src/core/arch/gemma2.c src/core/arch/gemma3.c src/core/arch/gemma4.c src/core/arch/mistral.c
 
 all: shaders gguf_dump tensor_map probe_model bench_stream test_dequant test_kernels test_attention test_ssm test_tokenizer diskllm-cli diskllm-server diskllm
 

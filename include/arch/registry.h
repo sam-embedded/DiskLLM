@@ -21,6 +21,9 @@ extern const diskllm_arch_backend diskllm_arch_qwen;
 extern const diskllm_arch_backend diskllm_arch_llama;
 extern const diskllm_arch_backend diskllm_arch_phi3;
 extern const diskllm_arch_backend diskllm_arch_gemma;
+extern const diskllm_arch_backend diskllm_arch_gemma2;
+extern const diskllm_arch_backend diskllm_arch_gemma3;
+extern const diskllm_arch_backend diskllm_arch_gemma4;
 extern const diskllm_arch_backend diskllm_arch_mistral;
 
 #endif /* DISKLLM_ARCH_REGISTRY_H */

@@ -95,6 +95,7 @@ static uint64_t get_type_size(uint32_t type, uint64_t nelements) {
         case 16: return nelements * 1; // I8
         case 17: return nelements * 2; // I16
         case 18: return nelements * 4; // I32
+        case 30: return nelements * 2; // BF16
         default: return 0;
     }
 }
@@ -694,8 +695,14 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
     GET_U32(cfg->num_attn_heads, "attention.head_count", 24);
     GET_U32(cfg->num_kv_heads, "attention.head_count_kv", 4);
     GET_U32(cfg->key_length, "attention.key_length", 0);
-    if (cfg->key_length <= 0 && cfg->num_attn_heads > 0 && cfg->hidden_dim > 0) {
-        cfg->key_length = cfg->hidden_dim / cfg->num_attn_heads;
+    if (cfg->key_length <= 0) {
+        const tensor_info *ti_k = find_tensor(cat, "blk.0.attn_k.weight");
+        if (!ti_k) ti_k = find_tensor(cat, "blk.0.attn_v.weight");
+        if (ti_k && ti_k->n_dims >= 2 && cfg->num_kv_heads > 0) {
+            cfg->key_length = (int)(ti_k->dims[1] / cfg->num_kv_heads);
+        } else if (cfg->num_attn_heads > 0 && cfg->hidden_dim > 0) {
+            cfg->key_length = cfg->hidden_dim / cfg->num_attn_heads;
+        }
     }
     GET_U32(cfg->value_length, "attention.value_length", 0);
     if (cfg->value_length <= 0) {
@@ -830,9 +837,15 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
         cfg->model_type = MODEL_TYPE_LLAMA;
     } else if (!strcasecmp(cfg->architecture, "mistral")) {
         cfg->model_type = MODEL_TYPE_MISTRAL;
+    } else if (!strcasecmp(cfg->architecture, "gemma4")) {
+        cfg->model_type = MODEL_TYPE_GEMMA4;
+    } else if (!strcasecmp(cfg->architecture, "gemma3")) {
+        cfg->model_type = MODEL_TYPE_GEMMA3;
+    } else if (!strcasecmp(cfg->architecture, "gemma2")) {
+        cfg->model_type = MODEL_TYPE_GEMMA2;
     } else if (!strncasecmp(cfg->architecture, "gemma", 5)) {
         cfg->model_type = MODEL_TYPE_GEMMA;
-    } else if (!strcasecmp(cfg->architecture, "phi3") || !strcasecmp(cfg->architecture, "phi-3")) {
+    } else if (!strcasecmp(cfg->architecture, "phi3") || !strcasecmp(cfg->architecture, "phi-3") || !strcasecmp(cfg->architecture, "phi4") || !strcasecmp(cfg->architecture, "phi-4") || !strcasecmp(cfg->architecture, "phi2")) {
         cfg->model_type = MODEL_TYPE_PHI3;
         cfg->has_fused_qkv = 1;
         /* Phi-3 doesn't store rope.freq_base; default to 10000 */
@@ -851,7 +864,13 @@ qwen_model_config *load_qwen_model_config(const char *filepath, const tensor_cat
         cfg->model_type = MODEL_TYPE_QWEN_ATTENTION_ONLY;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "llama")) {
         cfg->model_type = MODEL_TYPE_LLAMA;
-    } else if (arch_flag_str && (!strcmp(arch_flag_str, "gemma") || !strcmp(arch_flag_str, "gemma4"))) {
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "gemma4")) {
+        cfg->model_type = MODEL_TYPE_GEMMA4;
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "gemma3")) {
+        cfg->model_type = MODEL_TYPE_GEMMA3;
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "gemma2")) {
+        cfg->model_type = MODEL_TYPE_GEMMA2;
+    } else if (arch_flag_str && !strcmp(arch_flag_str, "gemma")) {
         cfg->model_type = MODEL_TYPE_GEMMA;
     } else if (arch_flag_str && !strcmp(arch_flag_str, "mistral")) {
         cfg->model_type = MODEL_TYPE_MISTRAL;

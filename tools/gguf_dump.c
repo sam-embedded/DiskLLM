@@ -213,6 +213,7 @@ const char *ggml_type_name(uint32_t type) {
         case 16: return "I8";
         case 17: return "I16";
         case 18: return "I32";
+        case 30: return "BF16";
         default: return "UNKNOWN";
     }
 }
@@ -234,6 +235,7 @@ uint64_t ggml_type_size(uint32_t type, uint64_t nelements) {
         case 16: return nelements * 1; // I8
         case 17: return nelements * 2; // I16
         case 18: return nelements * 4; // I32
+        case 30: return nelements * 2; // BF16
         default: return 0;
     }
 }

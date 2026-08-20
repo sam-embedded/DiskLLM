@@ -45,6 +45,12 @@ char *diskllm_format_chat_prompt(const diskllm_model *model, const char *system_
         } else {
             snprintf(chat_buf, blen, "<|user|>\n%s<|end|>\n<|assistant|>\n", user_prompt);
         }
+    } else if (cfg->model_type == MODEL_TYPE_GEMMA || cfg->model_type == MODEL_TYPE_GEMMA2 || cfg->model_type == MODEL_TYPE_GEMMA3 || cfg->model_type == MODEL_TYPE_GEMMA4) {
+        if (system_prompt) {
+            snprintf(chat_buf, blen, "<start_of_turn>user\n%s\n\n%s<end_of_turn>\n<start_of_turn>model\n", system_prompt, user_prompt);
+        } else {
+            snprintf(chat_buf, blen, "<start_of_turn>user\n%s<end_of_turn>\n<start_of_turn>model\n", user_prompt);
+        }
     } else {
         if (system_prompt) {
             snprintf(chat_buf, blen, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_prompt, user_prompt);

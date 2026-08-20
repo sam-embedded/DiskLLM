@@ -12,7 +12,11 @@ void rmsnorm_ext(float * restrict out, const float * restrict x, const float * r
     
     float scale = (float)(1.0 / sqrt(ss));
     
-    if (add_one) {
+    if (!w) {
+        for (int i = 0; i < n; i++) {
+            out[i] = x[i] * scale;
+        }
+    } else if (add_one) {
         for (int i = 0; i < n; i++) {
             out[i] = x[i] * scale * (w[i] + 1.0f);
         }

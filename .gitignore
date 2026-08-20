@@ -1,8 +1,16 @@
 build/
 *.o
 diskllm
+diskllm-cli
+diskllm-server
 diskllm_asan
 diskllm_debug
+debug_forward
+inspect_*
+dump_*
+*.txt
+*.log
+.antigravitycli/
 gguf_dump
 tensor_map
 probe_model
@@ -18,3 +26,5 @@ test_crash
 *.bin
 *.gguf
 scratch/
+node_modules/
+webui/

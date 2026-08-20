@@ -18,6 +18,11 @@ typedef struct {
     float *attn_kv;         // size kv_total_dim
     float *ssm_qkv;         // size ssm_conv_dim
     float *logits;          // size vocab_size
+    float *ple_gate;        // size 256
+    float *ple_mult;        // size 256
+    float *ple_out;         // size hidden_dim
+    float *ple_proj_buf;    // size 10752
+    float *ple_token_buf;   // size 10752
 } scratch_buffers;
 
 scratch_buffers *allocate_scratch_buffers(const qwen_model_config *cfg);

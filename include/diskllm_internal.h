@@ -43,6 +43,16 @@ struct diskllm_model {
     size_t embed_row_bytes;
     size_t logit_row_bytes;
     float *output_norm;
+
+    /* Gemma 4 PLE (Per-Layer Embeddings) */
+    const void *per_layer_token_embd;
+    int per_layer_token_embd_type;
+    size_t per_layer_token_embd_row_bytes;
+    const void *per_layer_model_proj;
+    int per_layer_model_proj_type;
+    const float *per_layer_proj_norm;
+    int n_embd_per_layer;
+    const float *rope_freqs;
     
     diskllm_model_params params;
     const diskllm_arch_backend *arch_backend;
@@ -75,6 +85,11 @@ struct diskllm_context {
     int  *prompt_tokens;
     int  *gen_tokens;
     int   next_tok;
+    bool  debug_hidden_norm;
+
+    /* Gemma 4 PLE per-token cache: size [block_count * n_embd_per_layer] */
+    float *ple_cache;
+    float *ple_prompt_cache;
 };
 
 struct diskllm_sampler {

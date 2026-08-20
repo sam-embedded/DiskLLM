@@ -1,7 +1,9 @@
 #include "diskllm.h"
+#include "diskllm_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <getopt.h>
 #include <unistd.h>
 
@@ -60,32 +62,36 @@ int main(int argc, char **argv) {
     bool is_interactive = false;
     bool pin_weights = false;
     bool quiet = false;
+    bool debug_hidden_norm = false;
+    bool logits_summary = false;
 
     static struct option long_options[] = {
-        {"model",           required_argument, 0, 'm'},
-        {"arch",            required_argument, 0, 'a'},
-        {"prompt",          required_argument, 0, 'p'},
-        {"system",          required_argument, 0, 's'},
-        {"prompt-ids",      required_argument, 0, '1'},
-        {"prompt-ids-file", required_argument, 0, '2'},
-        {"max-tokens",      required_argument, 0, 'n'},
-        {"ctx",             required_argument, 0, 'c'},
-        {"threads",         required_argument, 0, 't'},
-        {"temp",            required_argument, 0, 'T'},
-        {"top-p",           required_argument, 0, 'P'},
-        {"top-k",           required_argument, 0, 'K'},
-        {"min-p",           required_argument, 0, 'M'},
-        {"repeat-penalty",  required_argument, 0, 'R'},
-        {"greedy",          no_argument,       0, 'g'},
-        {"chat",            no_argument,       0, 'C'},
-        {"interactive",     no_argument,       0, 'i'},
-        {"pin-weights",     no_argument,       0, 'W'},
-        {"io-mode",         required_argument, 0, 'I'},
-        {"save-state",      required_argument, 0, 'S'},
-        {"load-state",      required_argument, 0, 'L'},
-        {"state-info",      required_argument, 0, 'f'},
-        {"quiet",           no_argument,       0, 'q'},
-        {"help",            no_argument,       0, 'h'},
+        {"model",             required_argument, 0, 'm'},
+        {"arch",              required_argument, 0, 'a'},
+        {"prompt",            required_argument, 0, 'p'},
+        {"system",            required_argument, 0, 's'},
+        {"prompt-ids",        required_argument, 0, '1'},
+        {"prompt-ids-file",   required_argument, 0, '2'},
+        {"max-tokens",        required_argument, 0, 'n'},
+        {"ctx",               required_argument, 0, 'c'},
+        {"threads",           required_argument, 0, 't'},
+        {"temp",              required_argument, 0, 'T'},
+        {"top-p",             required_argument, 0, 'P'},
+        {"top-k",             required_argument, 0, 'K'},
+        {"min-p",             required_argument, 0, 'M'},
+        {"repeat-penalty",    required_argument, 0, 'R'},
+        {"greedy",            no_argument,       0, 'g'},
+        {"chat",              no_argument,       0, 'C'},
+        {"interactive",       no_argument,       0, 'i'},
+        {"pin-weights",       no_argument,       0, 'W'},
+        {"io-mode",           required_argument, 0, 'I'},
+        {"save-state",        required_argument, 0, 'S'},
+        {"load-state",        required_argument, 0, 'L'},
+        {"state-info",        required_argument, 0, 'f'},
+        {"quiet",             no_argument,       0, 'q'},
+        {"debug-hidden-norm", no_argument,       0, 1001},
+        {"logits-summary",    no_argument,       0, 1002},
+        {"help",              no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
@@ -115,6 +121,8 @@ int main(int argc, char **argv) {
             case 'L': load_state_path = optarg; break;
             case 'f': state_info_file = optarg; break;
             case 'q': quiet = true; break;
+            case 1001: debug_hidden_norm = true; break;
+            case 1002: logits_summary = true; break;
             case 'h': print_usage(argv[0]); return 0;
             default: break;
         }
@@ -154,6 +162,7 @@ int main(int argc, char **argv) {
         diskllm_model_free(model);
         return 1;
     }
+    ctx->debug_hidden_norm = debug_hidden_norm;
 
     diskllm_tokenizer *tok = diskllm_model_get_tokenizer(model);
 
@@ -197,6 +206,37 @@ int main(int argc, char **argv) {
 
     if (!load_state_path && prompt_len > 0) {
         diskllm_eval(ctx, prompt_tokens, prompt_len, logits);
+
+        if (logits_summary) {
+            double sum = 0.0;
+            float max_v = -1e30f;
+            float min_v = 1e30f;
+            int best_i = 0;
+            for (int i = 0; i < vocab_size; i++) {
+                float v = logits[i];
+                uint32_t u; memcpy(&u, &v, 4);
+                if ((u & 0x7F800000U) != 0x7F800000U) {
+                    sum += v;
+                    if (v > max_v) { max_v = v; best_i = i; }
+                    if (v < min_v) min_v = v;
+                }
+            }
+            double mean = sum / vocab_size;
+            double var = 0.0;
+            for (int i = 0; i < vocab_size; i++) {
+                float v = logits[i];
+                uint32_t u; memcpy(&u, &v, 4);
+                if ((u & 0x7F800000U) != 0x7F800000U) {
+                    double diff = v - mean;
+                    var += diff * diff;
+                }
+            }
+            double stddev = sqrt(var / vocab_size);
+            char pbuf[128] = {0};
+            diskllm_decode_token(tok, best_i, true, pbuf, sizeof(pbuf));
+            fprintf(stderr, "[LOGITS-SUMMARY] step 0: max=%.4f, min=%.4f, mean=%.4f, stddev=%.4f\n", max_v, min_v, (float)mean, (float)stddev);
+            fprintf(stderr, "Top 1: token_id=%d logit=%.4f piece='%s'\n", best_i, max_v, pbuf);
+        }
 
         if (save_state_path) {
             if (!quiet) printf("[INFO] Saving KV state to %s...\n", save_state_path);

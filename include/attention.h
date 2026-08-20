@@ -10,11 +10,15 @@
 typedef struct {
     const float *attn_norm_w;
     const void *attn_q_w;
+    const float *attn_q_b;
     const float *attn_q_norm_w;
     const void *attn_k_w;
+    const float *attn_k_b;
     const float *attn_k_norm_w;
     const void *attn_v_w;
+    const float *attn_v_b;
     const void *attn_output_w;
+    const float *post_attn_norm_w; /* optional post-attention RMSNorm for Gemma */
     const void *attn_qkv_w;   /* fused QKV weight for Phi-3 style models */
     
     int attn_q_w_type;
@@ -22,6 +26,8 @@ typedef struct {
     int attn_v_w_type;
     int attn_output_w_type;
     int attn_qkv_w_type;      /* type for fused QKV */
+
+    const float *rope_freqs;  /* optional rope frequency multipliers (e.g. Gemma 4) */
 
     int q_total_dim;
     int k_total_dim;

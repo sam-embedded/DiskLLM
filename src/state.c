@@ -30,7 +30,12 @@ model_state *allocate_model_state_ex(const qwen_model_config *cfg, int context_l
     int ssm_count = 0;
     for (int b = 0; b < cfg->block_count; b++) {
         if (cfg->layer_types[b] == LAYER_TYPE_ATTENTION) {
-            state->layer_to_attn_idx[b] = attn_count++;
+            if (cfg->model_type == MODEL_TYPE_GEMMA4 && b >= 24) {
+                int shared_layer = (b == 29 || b == 35 || b == 41) ? 23 : 22;
+                state->layer_to_attn_idx[b] = state->layer_to_attn_idx[shared_layer];
+            } else {
+                state->layer_to_attn_idx[b] = attn_count++;
+            }
             state->layer_to_ssm_idx[b] = -1;
         } else if (cfg->layer_types[b] == LAYER_TYPE_SSM) {
             state->layer_to_ssm_idx[b] = ssm_count++;

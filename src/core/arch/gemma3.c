@@ -21,12 +21,12 @@ typedef struct {
     } u;
 } layer_block_weights_internal;
 
-static bool gemma_init(diskllm_model *model) {
+static bool gemma3_init(diskllm_model *model) {
     (void)model;
     return true;
 }
 
-static bool gemma_prefill_layer(diskllm_context *ctx, int layer_idx, const void *layer_weights, float *hidden_states, int prompt_len) {
+static bool gemma3_prefill_layer(diskllm_context *ctx, int layer_idx, const void *layer_weights, float *hidden_states, int prompt_len) {
     diskllm_model *model = ctx->model;
     const qwen_model_config *cfg = model->cfg;
     const layer_block_weights_internal *blk = (const layer_block_weights_internal *)layer_weights;
@@ -63,7 +63,7 @@ static bool gemma_prefill_layer(diskllm_context *ctx, int layer_idx, const void 
     return true;
 }
 
-static bool gemma_decode_layer(diskllm_context *ctx, int layer_idx, const void *layer_weights, float *hidden_single, int cur_pos) {
+static bool gemma3_decode_layer(diskllm_context *ctx, int layer_idx, const void *layer_weights, float *hidden_single, int cur_pos) {
     diskllm_model *model = ctx->model;
     const qwen_model_config *cfg = model->cfg;
     const layer_block_weights_internal *blk = (const layer_block_weights_internal *)layer_weights;
@@ -97,9 +97,9 @@ static bool gemma_decode_layer(diskllm_context *ctx, int layer_idx, const void *
     return true;
 }
 
-const diskllm_arch_backend diskllm_arch_gemma = {
-    .name = "Gemma",
-    .init = gemma_init,
-    .prefill_layer = gemma_prefill_layer,
-    .decode_layer = gemma_decode_layer
+const diskllm_arch_backend diskllm_arch_gemma3 = {
+    .name = "Gemma3",
+    .init = gemma3_init,
+    .prefill_layer = gemma3_prefill_layer,
+    .decode_layer = gemma3_decode_layer
 };
