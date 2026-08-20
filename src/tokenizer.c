@@ -56,17 +56,24 @@ struct tokenizer {
 /* ─── GPT-2 Byte-to-Unicode Mapping ───────────────────────────────────────── */
 
 static uint32_t gpt2_bytes_to_unicode[256];
+static int gpt2_unicode_to_bytes[1024];
 static int gpt2_table_initialized = 0;
 
 static void init_gpt2_bytes_to_unicode(void) {
     if (gpt2_table_initialized) return;
+    for (int i = 0; i < 1024; i++) gpt2_unicode_to_bytes[i] = -1;
     int n = 0;
     for (int b = 0; b < 256; b++) {
+        uint32_t cp;
         if ((b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255)) {
-            gpt2_bytes_to_unicode[b] = (uint32_t)b;
+            cp = (uint32_t)b;
         } else {
-            gpt2_bytes_to_unicode[b] = (uint32_t)(256 + n);
+            cp = (uint32_t)(256 + n);
             n++;
+        }
+        gpt2_bytes_to_unicode[b] = cp;
+        if (cp < 1024) {
+            gpt2_unicode_to_bytes[cp] = b;
         }
     }
     gpt2_table_initialized = 1;
@@ -413,28 +420,40 @@ int tokenizer_decode_token(const tokenizer *tok, int32_t token_id, int is_first_
         return (int)out_idx;
     }
 
+    init_gpt2_bytes_to_unicode();
+
     // If first token and starts with GPT-2 space 'Ġ' (0xC4 0xA0), skip the leading Ġ
     if (is_first_token && rlen >= 2 && (unsigned char)raw[0] == 0xC4 && (unsigned char)raw[1] == 0xA0) {
         i += 2;
     }
 
     while (i < rlen && out_idx + 1 < max_len) {
-        // GPT-2 'Ġ' (U+0120 = 0xC4 0xA0) -> ASCII space ' '
-        if (i + 1 < rlen && (unsigned char)raw[i] == 0xC4 && (unsigned char)raw[i+1] == 0xA0) {
-            out_buf[out_idx++] = ' ';
-            i += 2;
+        unsigned char c0 = (unsigned char)raw[i];
+        uint32_t cp = 0;
+        size_t cp_len = 0;
+
+        if (c0 < 0x80) {
+            cp = c0;
+            cp_len = 1;
+        } else if ((c0 & 0xE0) == 0xC0 && i + 1 < rlen) {
+            cp = ((c0 & 0x1F) << 6) | ((unsigned char)raw[i+1] & 0x3F);
+            cp_len = 2;
+        } else if ((c0 & 0xF0) == 0xE0 && i + 2 < rlen) {
+            cp = ((c0 & 0x0F) << 12) | (((unsigned char)raw[i+1] & 0x3F) << 6) | ((unsigned char)raw[i+2] & 0x3F);
+            cp_len = 3;
+        } else if ((c0 & 0xF8) == 0xF0 && i + 3 < rlen) {
+            cp = ((c0 & 0x07) << 18) | (((unsigned char)raw[i+1] & 0x3F) << 12) | (((unsigned char)raw[i+2] & 0x3F) << 6) | ((unsigned char)raw[i+3] & 0x3F);
+            cp_len = 4;
         }
-        // GPT-2 'Ċ' (U+010A = 0xC4 0x8A) -> ASCII newline '\n'
-        else if (i + 1 < rlen && (unsigned char)raw[i] == 0xC4 && (unsigned char)raw[i+1] == 0x8A) {
-            out_buf[out_idx++] = '\n';
-            i += 2;
-        }
-        // GPT-2 'ĉ' (U+0109 = 0xC4 0x89) -> ASCII tab '\t'
-        else if (i + 1 < rlen && (unsigned char)raw[i] == 0xC4 && (unsigned char)raw[i+1] == 0x89) {
-            out_buf[out_idx++] = '\t';
-            i += 2;
-        }
-        else {
+
+        if (cp_len > 0 && cp < 1024 && gpt2_unicode_to_bytes[cp] >= 0) {
+            out_buf[out_idx++] = (char)gpt2_unicode_to_bytes[cp];
+            i += cp_len;
+        } else if (cp_len > 0) {
+            for (size_t k = 0; k < cp_len && out_idx + 1 < max_len; k++) {
+                out_buf[out_idx++] = raw[i++];
+            }
+        } else {
             out_buf[out_idx++] = raw[i++];
         }
     }

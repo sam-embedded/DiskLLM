@@ -15,8 +15,9 @@ const diskllm_arch_backend *diskllm_arch_find(int model_type) {
 
     switch (model_type) {
         case MODEL_TYPE_QWEN_HYBRID:
+            return &diskllm_arch_qwen35;
         case MODEL_TYPE_QWEN_ATTENTION_ONLY:
-            return &diskllm_arch_qwen;
+            return &diskllm_arch_qwen2;
         case MODEL_TYPE_LLAMA:
             return &diskllm_arch_llama;
         case MODEL_TYPE_MISTRAL:
@@ -32,6 +33,6 @@ const diskllm_arch_backend *diskllm_arch_find(int model_type) {
         case MODEL_TYPE_GEMMA4:
             return &diskllm_arch_gemma4;
         default:
-            return &diskllm_arch_qwen;
+            return &diskllm_arch_qwen2;
     }
 }

@@ -18,6 +18,8 @@ const diskllm_arch_backend *diskllm_arch_find(int model_type);
 
 /* Individual Architecture Drivers */
 extern const diskllm_arch_backend diskllm_arch_qwen;
+extern const diskllm_arch_backend diskllm_arch_qwen35;
+extern const diskllm_arch_backend diskllm_arch_qwen2;
 extern const diskllm_arch_backend diskllm_arch_llama;
 extern const diskllm_arch_backend diskllm_arch_phi3;
 extern const diskllm_arch_backend diskllm_arch_gemma;
