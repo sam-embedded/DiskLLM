@@ -1,18 +1,38 @@
-# DiskLLM v3.0
+# DiskLLM v4.0.0
 
-> **Modular, High-Performance Pure C11 Inference Engine & OpenAI-Compatible Server for Multi-Architecture LLMs (Qwen, Llama, Mistral, Gemma, Phi-3)**
+> **Modular, High-Performance Pure C11 Inference Engine, Multimodal Vision-Language Support & OpenAI Server for Multi-Architecture LLMs/VLMs**
 
-DiskLLM is a ultra-lightweight, high-performance LLM inference library (`libdiskllm`), CLI tool (`diskllm-cli`), and OpenAI-compatible HTTP server (`diskllm-server`) written in **pure C11** with zero external ML framework dependencies.
+DiskLLM is an ultra-lightweight, high-performance LLM/VLM inference library (`libdiskllm`), CLI tool (`diskllm-cli`), and OpenAI-compatible HTTP server (`diskllm-server`) written in **pure C11** with zero external ML framework dependencies.
 
-It enables executing large language models—ranging from **1B to 27B+ parameters**—on consumer mobile devices (e.g. Android / Termux) and embedded hardware with **sub-1GB RAM footprint** by dynamically streaming model weights directly from disk storage.
+It enables executing large language models and vision-language models—ranging from **0.8B to 27B+ parameters**—on consumer mobile devices (e.g. Android / Termux) and embedded hardware with **sub-1GB RAM footprint** by dynamically streaming model weights directly from disk storage.
 
 ---
 
-## What's New in v3.0
+## 🌟 New in v4.0.0: Multimodal Vision Support
+
+- **Native Vision Transformer (ViT) & Multi-Architecture Projector**: Built-in pure C Vision Transformer encoder with patch Conv2D projection, self-attention, and spatial merge MLP projectors (`mm.0` -> GELU -> `mm.2`).
+- **Vision-Language Models (VLMs)**: Full support for **Qwen 3.5 VL** and **Qwen 2.5 VL** multimodal image understanding and OCR.
+- **Single-Header Image Decoding (`stb_image`)**: Decodes JPEG/PNG image files with automatic bilinear resizing and channel normalization into flat RGB tensors.
+- **Multimodal Visual Token Injection**: Delivers seamless visual embedding replacement at `<|image_pad|>` token placeholders during prompt prefill.
+
+### Running a Vision-Language Model (VLM):
+```bash
+./diskllm-cli \
+    --model /path/to/Qwen3.5-0.8B-Q4_K_M.gguf \
+    --mmproj /path/to/mmproj-Qwen3.5-0.8B-F16.gguf \
+    --image /path/to/image.jpg \
+    --chat \
+    --prompt "Extract the text from this image." \
+    --threads 4
+```
+
+---
+
+## What's New in v3.x / v4.0.0
 
 - **Modular C Library (`libdiskllm`)**: Monolithic code refactored into a clean public API (`include/diskllm.h`), internal core engine (`src/core/`), and architecture registry (`include/arch/registry.h`).
 - **OpenAI-Compatible HTTP Server (`diskllm-server`)**: Pure C POSIX HTTP socket server supporting `POST /v1/chat/completions` with real-time Server-Sent Events (SSE) streaming (`data: ...`, `data: [DONE]`).
-- **Multi-Architecture Support**: Native C forward drivers for **Qwen** (hybrid SSM/Attention), **Llama 3.2**, **Mistral**, **Gemma**, and **Microsoft Phi-3** (fused QKV & packed SwiGLU).
+- **Multi-Architecture Support**: Native C forward drivers for **Qwen 3.5 VL / Qwen 2.5 VL (Multimodal)**, **Qwen 3.5 Hybrid SSM**, **Llama 3.2**, **Mistral**, **Gemma (1/2/3/4)**, and **Microsoft Phi-3**.
 - **RAM Weight Pinning (`--pin-weights`)**: Zero-I/O decode execution for small models by memory-mapping and locking weights in RAM (`mlock`).
 - **Sub-1GB Disk Streaming**: Fixed ~600MB–1.6GB RAM footprint for running 27B models on constrained devices.
 
@@ -32,11 +52,13 @@ It enables executing large language models—ranging from **1B to 27B+ parameter
 ## 🧠 Supported Architectures
 
 DiskLLM dynamically detects and supports multiple model families without recompilation:
+- **Qwen 3.5 VL / Qwen 2.5 VL** (Native Multimodal ViT + 2x2 Spatial Merger + OCR)
 - **Qwen 3.5 Hybrid** (SSM/Attention, Query Gating, NeoX RoPE)
 - **Qwen 2.5 / 2** (Pure Attention, Optional Q/K/V Bias)
 - **Llama 3 / 3.2** (Pure Attention, Consecutive RoPE, GQA)
 - **Mistral 7B** (Pure Attention, GQA)
 - **Phi-3 Mini** (Fused QKV, Packed SwiGLU)
+- **Gemma 1 / 2 / 3 / 4** (RMSNorm Scaling, GQA)
 
 ---
 

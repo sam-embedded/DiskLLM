@@ -51,6 +51,7 @@ typedef struct {
     int   top_k;                /* Top-K sampling */
     float min_p;                /* Min-P sampling */
     float repeat_penalty;       /* Repetition penalty (1.0 = disabled) */
+    float presence_penalty;     /* Presence penalty (0.0 = disabled) */
     uint64_t seed;              /* Random seed */
 } diskllm_sampler_params;
 
@@ -90,6 +91,12 @@ diskllm_tokenizer *diskllm_model_get_tokenizer(diskllm_model *model);
 int                diskllm_tokenize(const diskllm_tokenizer *tok, const char *text, int *out_tokens, int max_tokens, bool add_bos);
 int                diskllm_decode_token(const diskllm_tokenizer *tok, int token, bool is_first, char *buf, size_t buf_size);
 char              *diskllm_format_chat_prompt(const diskllm_model *model, const char *system_prompt, const char *user_prompt);
+char              *diskllm_format_chat_prompt_ex(const diskllm_model *model, const char *system_prompt, const char *user_prompt, bool enable_thinking);
+char              *diskllm_format_agent_prompt(const diskllm_model *model, const char *tools_json, const char *system_instructions, const char *user_prompt, bool enable_thinking);
+char              *diskllm_format_image_prompt(const diskllm_model *model, const char *image_path_or_desc, const char *user_prompt, bool enable_thinking);
+char              *diskllm_format_tool_response(const diskllm_model *model, const char *tool_output_json);
+char              *diskllm_format_fim_prompt(const diskllm_model *model, const char *prefix, const char *suffix, const char *repo_name, const char *file_name);
+char              *diskllm_strip_think_tags(const char *text);
 
 /* ─── Context & Inference API ──────────────────────────────────────────────── */
 
@@ -98,6 +105,9 @@ void             diskllm_context_free(diskllm_context *ctx);
 
 /* Prefill prompt tokens, returns 0 on success. Logits buffer size must be vocab_size. */
 int              diskllm_eval(diskllm_context *ctx, const int *tokens, int n_tokens, float *logits);
+
+/* Prefill multimodal prompt (text tokens + visual patch embeddings injected at image_pad position). */
+int              diskllm_eval_multimodal(diskllm_context *ctx, const int *tokens, int n_tokens, int img_pad_pos, const float *visual_embeddings, int n_patches, float *logits);
 
 /* Run single autoregressive decode step for token, returns 0 on success. */
 int              diskllm_decode_step(diskllm_context *ctx, int token, float *logits);

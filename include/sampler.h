@@ -24,6 +24,9 @@ void sampler_free(sampler *s);
 // Apply repetition penalty to logits for previously seen tokens
 void sampler_apply_repetition_penalty(float *logits, int vocab_size, const int *seen_tokens, int num_seen, float penalty);
 
+// Apply additive presence penalty to logits for previously seen tokens
+void sampler_apply_presence_penalty(float *logits, int vocab_size, const int *seen_tokens, int num_seen, float presence_penalty);
+
 // Sample from logits. Returns token index.
 int sampler_sample(sampler *s, float *logits, int vocab_size);
 

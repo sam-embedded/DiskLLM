@@ -1,8 +1,12 @@
 #ifndef DISKLLM_INTERNAL_H
 #define DISKLLM_INTERNAL_H
 
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <time.h>
 #include "diskllm.h"

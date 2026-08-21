@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
-MODEL_PATH="${MODEL_PATH:-/data/data/com.termux/files/home/models/Qwen3.8-27B-Q4_K_M.gguf}"
-if [ ! -f "$MODEL_PATH" ]; then
-    MODEL_PATH="models/model.gguf"
+if [ -z "$MODEL_PATH" ]; then
+    if [ -f "/home/sam/models/Qwen3.5-0.8B-Q4_K_M.gguf" ]; then
+        MODEL_PATH="/home/sam/models/Qwen3.5-0.8B-Q4_K_M.gguf"
+    elif [ -f "/home/sam/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf" ]; then
+        MODEL_PATH="/home/sam/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+    elif [ -f "models/model.gguf" ]; then
+        MODEL_PATH="models/model.gguf"
+    fi
 fi
 SCRATCH_DIR="scratch"
 mkdir -p "$SCRATCH_DIR"
 
 echo "========================================================"
-echo "          DiskLLM v1.0 Final Validation Suite           "
+echo "          DiskLLM v4.0.0 Final Validation Suite         "
 echo "========================================================"
 
 STAGE_FAILURES=0
@@ -33,7 +38,7 @@ run_stage "BUILD (Make clean & build)" "make clean && make"
 run_stage "UNIT_TESTS (Dequant, Kernels, SSM, Attention)" "./test_dequant && ./test_kernels && ./test_ssm && ./test_attention"
 
 # 3. TOKENIZER TESTS
-TOKENIZER_MODEL="${TOKENIZER_MODEL:-/data/data/com.termux/files/home/models/Qwen3.8-27B-Q4_K_M.gguf}"
+TOKENIZER_MODEL="${TOKENIZER_MODEL:-$MODEL_PATH}"
 run_stage "TOKENIZER_TESTS (BPE & ChatML encoding)" "./test_tokenizer '$TOKENIZER_MODEL'"
 
 # 4. GREEDY GENERATION

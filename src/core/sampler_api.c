@@ -7,6 +7,7 @@ diskllm_sampler_params diskllm_sampler_params_default(void) {
         .top_k = 40,
         .min_p = 0.05f,
         .repeat_penalty = 1.0f,
+        .presence_penalty = 0.0f,
         .seed = 0
     };
 }
@@ -40,6 +41,10 @@ void diskllm_sampler_free(diskllm_sampler *smp) {
 
 int diskllm_sample(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen) {
     if (!smp || !smp->smp || !logits || vocab_size <= 0) return 0;
+
+    if (smp->params.presence_penalty != 0.0f && seen_tokens && n_seen > 0) {
+        sampler_apply_presence_penalty(logits, vocab_size, seen_tokens, n_seen, smp->params.presence_penalty);
+    }
 
     if (smp->params.repeat_penalty > 1.0f && seen_tokens && n_seen > 0) {
         sampler_apply_repetition_penalty(logits, vocab_size, seen_tokens, n_seen, smp->params.repeat_penalty);

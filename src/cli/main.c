@@ -1,5 +1,6 @@
 #include "diskllm.h"
 #include "diskllm_internal.h"
+#include "vision.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,7 @@ static void print_usage(const char *prog_name) {
     printf("  --system <text>             System prompt (for --chat)\n");
     printf("  --prompt-ids <id1,id2,...>  Comma-separated token IDs\n");
     printf("  --prompt-ids-file <path>    Path to text file containing token IDs\n");
-    printf("  --max-tokens <int>          Max generated tokens (default: 128)\n");
+    printf("  --max-tokens <int>          Max generated tokens (default: 512)\n");
     printf("  --ctx <int>                 Context capacity (default: 4096)\n");
     printf("  --threads <int>             Matvec computing threads (default: CPU cores)\n");
     printf("  --temp <float>              Sampling temperature (default: 0.7)\n");
@@ -25,6 +26,16 @@ static void print_usage(const char *prog_name) {
     printf("  --top-k <int>               Top-K threshold (default: 40)\n");
     printf("  --min-p <float>             Min-P threshold (default: 0.05)\n");
     printf("  --repeat-penalty <float>    Repetition penalty (default: 1.0)\n");
+    printf("  --presence-penalty <float>  Presence penalty (default: 0.0)\n");
+    printf("  --thinking                  Enable thinking mode for reasoning models (e.g. Qwen 3.5)\n");
+    printf("  --preset <name>             Sampling preset (qwen-non-thinking-text, qwen-thinking-text, qwen-coding, qwen-vl)\n");
+    printf("  --image <path>              Image file path / URL to feed to multimodal vision prompt\n");
+    printf("  --mmproj <path>             Path to multimodal projector / vision GGUF model\n");
+    printf("  --tools <json/text>         JSON tool definitions for Agentic function calling\n");
+    printf("  --fim-prefix <text>         FIM prefix for code completion\n");
+    printf("  --fim-suffix <text>         FIM suffix for code completion\n");
+    printf("  --fim-repo <name>           Repository context for code completion\n");
+    printf("  --fim-file <name>           File name context for code completion\n");
     printf("  --greedy                    Greedy sampling (temp=0.0)\n");
     printf("  --chat                      Auto-wrap prompt in Chat template\n");
     printf("  --interactive, -i           Interactive multi-turn REPL chat mode\n");
@@ -42,14 +53,22 @@ int main(int argc, char **argv) {
     char *arch_str = "auto";
     char *prompt_text = NULL;
     char *system_text = NULL;
+    char *image_path = NULL;
+    char *mmproj_path = NULL;
+    char *tools_text = NULL;
+    char *fim_prefix = NULL;
+    char *fim_suffix = NULL;
+    char *fim_repo = NULL;
+    char *fim_file = NULL;
     char *prompt_ids_str = NULL;
     char *prompt_ids_file = NULL;
     char *save_state_path = NULL;
     char *load_state_path = NULL;
     char *state_info_file = NULL;
     char *io_mode_str = "pread";
+    char *preset_str = NULL;
 
-    int max_tokens = 128;
+    int max_tokens = 512;
     int context_size = 4096;
     int num_threads = 0;
     float temp = 0.7f;
@@ -57,8 +76,10 @@ int main(int argc, char **argv) {
     int top_k = 40;
     float min_p = 0.05f;
     float repeat_penalty = 1.0f;
+    float presence_penalty = 0.0f;
     bool greedy = false;
     bool is_chat = false;
+    bool is_thinking = false;
     bool is_interactive = false;
     bool pin_weights = false;
     bool quiet = false;
@@ -70,6 +91,11 @@ int main(int argc, char **argv) {
         {"arch",              required_argument, 0, 'a'},
         {"prompt",            required_argument, 0, 'p'},
         {"system",            required_argument, 0, 's'},
+        {"tools",             required_argument, 0, 1005},
+        {"fim-prefix",        required_argument, 0, 1006},
+        {"fim-suffix",        required_argument, 0, 1007},
+        {"fim-repo",          required_argument, 0, 1008},
+        {"fim-file",          required_argument, 0, 1009},
         {"prompt-ids",        required_argument, 0, '1'},
         {"prompt-ids-file",   required_argument, 0, '2'},
         {"max-tokens",        required_argument, 0, 'n'},
@@ -80,6 +106,12 @@ int main(int argc, char **argv) {
         {"top-k",             required_argument, 0, 'K'},
         {"min-p",             required_argument, 0, 'M'},
         {"repeat-penalty",    required_argument, 0, 'R'},
+        {"presence-penalty",  required_argument, 0, 'E'},
+        {"thinking",          no_argument,       0, 1003},
+        {"think",             no_argument,       0, 1003},
+        {"preset",            required_argument, 0, 1004},
+        {"image",             required_argument, 0, 1010},
+        {"mmproj",            required_argument, 0, 1011},
         {"greedy",            no_argument,       0, 'g'},
         {"chat",              no_argument,       0, 'C'},
         {"interactive",       no_argument,       0, 'i'},
@@ -96,12 +128,19 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:a:p:s:n:c:t:iWqh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:a:p:s:n:c:t:iWqhT:P:K:M:R:E:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': model_path = optarg; break;
             case 'a': arch_str = optarg; break;
             case 'p': prompt_text = optarg; break;
             case 's': system_text = optarg; break;
+            case 1005: tools_text = optarg; is_chat = true; break;
+            case 1006: fim_prefix = optarg; break;
+            case 1007: fim_suffix = optarg; break;
+            case 1008: fim_repo = optarg; break;
+            case 1009: fim_file = optarg; break;
+            case 1010: image_path = optarg; is_chat = true; break;
+            case 1011: mmproj_path = optarg; break;
             case '1': prompt_ids_str = optarg; break;
             case '2': prompt_ids_file = optarg; break;
             case 'n': max_tokens = atoi(optarg); break;
@@ -112,6 +151,9 @@ int main(int argc, char **argv) {
             case 'K': top_k = atoi(optarg); break;
             case 'M': min_p = atof(optarg); break;
             case 'R': repeat_penalty = atof(optarg); break;
+            case 'E': presence_penalty = atof(optarg); break;
+            case 1003: is_thinking = true; is_chat = true; break;
+            case 1004: preset_str = optarg; break;
             case 'g': greedy = true; temp = 0.0f; break;
             case 'C': is_chat = true; break;
             case 'i': is_interactive = true; is_chat = true; break;
@@ -125,6 +167,18 @@ int main(int argc, char **argv) {
             case 1002: logits_summary = true; break;
             case 'h': print_usage(argv[0]); return 0;
             default: break;
+        }
+    }
+
+    if (preset_str) {
+        if (!strcmp(preset_str, "qwen-non-thinking-text")) {
+            temp = 1.0f; top_p = 1.00f; top_k = 20; min_p = 0.0f; presence_penalty = 2.0f; repeat_penalty = 1.0f; is_chat = true; is_thinking = false;
+        } else if (!strcmp(preset_str, "qwen-non-thinking-vl") || !strcmp(preset_str, "qwen-vl")) {
+            temp = 0.7f; top_p = 0.80f; top_k = 20; min_p = 0.0f; presence_penalty = 1.5f; repeat_penalty = 1.0f; is_chat = true; is_thinking = false;
+        } else if (!strcmp(preset_str, "qwen-thinking-text") || !strcmp(preset_str, "qwen-thinking")) {
+            temp = 1.0f; top_p = 0.95f; top_k = 20; min_p = 0.0f; presence_penalty = 1.5f; repeat_penalty = 1.0f; is_chat = true; is_thinking = true;
+        } else if (!strcmp(preset_str, "qwen-coding") || !strcmp(preset_str, "qwen-thinking-vl")) {
+            temp = 0.6f; top_p = 0.95f; top_k = 20; min_p = 0.0f; presence_penalty = 0.0f; repeat_penalty = 1.0f; is_chat = true; is_thinking = true;
         }
     }
 
@@ -166,10 +220,19 @@ int main(int argc, char **argv) {
 
     diskllm_tokenizer *tok = diskllm_model_get_tokenizer(model);
 
-    /* Format chat prompt if requested */
+    /* Format chat, FIM, or vision image prompt if requested */
     char *formatted_prompt = NULL;
-    if (is_chat && prompt_text) {
-        formatted_prompt = diskllm_format_chat_prompt(model, system_text, prompt_text);
+    if (image_path && prompt_text) {
+        formatted_prompt = diskllm_format_image_prompt(model, image_path, prompt_text, is_thinking);
+        if (formatted_prompt) prompt_text = formatted_prompt;
+    } else if (fim_prefix || fim_suffix) {
+        formatted_prompt = diskllm_format_fim_prompt(model, fim_prefix, fim_suffix, fim_repo, fim_file);
+        if (formatted_prompt) prompt_text = formatted_prompt;
+    } else if (tools_text && prompt_text) {
+        formatted_prompt = diskllm_format_agent_prompt(model, tools_text, system_text, prompt_text, is_thinking);
+        if (formatted_prompt) prompt_text = formatted_prompt;
+    } else if (is_chat && prompt_text) {
+        formatted_prompt = diskllm_format_chat_prompt_ex(model, system_text, prompt_text, is_thinking);
         if (formatted_prompt) prompt_text = formatted_prompt;
     }
 
@@ -205,7 +268,38 @@ int main(int argc, char **argv) {
     float *logits = malloc(vocab_size * sizeof(float));
 
     if (!load_state_path && prompt_len > 0) {
-        diskllm_eval(ctx, prompt_tokens, prompt_len, logits);
+        float *vis_emb = NULL;
+        int n_patches = 0;
+        int img_pad_pos = -1;
+
+        if (image_path && mmproj_path) {
+            diskllm_vision_model *vm = diskllm_vision_load(mmproj_path);
+            if (vm) {
+                int img_w = 0, img_h = 0;
+                float *rgb = diskllm_image_load_rgb(image_path, vm->cfg.image_size, vm->cfg.image_size, &img_w, &img_h, vm->cfg.image_mean, vm->cfg.image_std);
+                if (rgb) {
+                    vis_emb = diskllm_vision_encode(vm, rgb, img_w, img_h, &n_patches, num_threads);
+                    diskllm_image_free(rgb);
+                }
+                diskllm_vision_free(vm);
+            }
+
+            /* Find image_pad token ID (e.g. 248056 in Qwen 3.5 / 2.5) */
+            for (int i = 0; i < prompt_len; i++) {
+                if (prompt_tokens[i] == 248056 || prompt_tokens[i] == 151655 || prompt_tokens[i] == 32000) {
+                    img_pad_pos = i;
+                    break;
+                }
+            }
+        }
+
+        if (vis_emb && n_patches > 0 && img_pad_pos >= 0) {
+            if (!quiet) printf("[INFO] Injected %d visual patch embeddings at prompt token index %d\n", n_patches, img_pad_pos);
+            diskllm_eval_multimodal(ctx, prompt_tokens, prompt_len, img_pad_pos, vis_emb, n_patches, logits);
+            free(vis_emb);
+        } else {
+            diskllm_eval(ctx, prompt_tokens, prompt_len, logits);
+        }
 
         if (logits_summary) {
             double sum = 0.0;
@@ -251,6 +345,7 @@ int main(int argc, char **argv) {
     sparams.top_k = top_k;
     sparams.min_p = min_p;
     sparams.repeat_penalty = repeat_penalty;
+    sparams.presence_penalty = presence_penalty;
 
     diskllm_sampler *smp = diskllm_sampler_init(sparams);
 

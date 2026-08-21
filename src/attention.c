@@ -385,6 +385,20 @@ void attention_forward(
         for (int i = 0; i < q_total_dim; i++) scratch->attn_q[i] += weights->attn_q_b[i];
     }
 
+    /* 2.1b Apply QK-Norm to Q (BEFORE RoPE) */
+    if (weights->attn_q_norm_w) {
+        for (int h_q = 0; h_q < num_attn_heads; h_q++) {
+            float *q_head = scratch->attn_q + h_q * q_dim_per_head;
+            rmsnorm_ext(q_head, q_head, weights->attn_q_norm_w, head_dim, 1e-6f, add_one);
+        }
+    }
+
+    /* 2.1c Apply RoPE to Q */
+    for (int h_q = 0; h_q < num_attn_heads; h_q++) {
+        float *q_head = scratch->attn_q + h_q * q_dim_per_head;
+        apply_rope(q_head, pos, freq_base, rope_dim, weights ? weights->rope_freqs : NULL, cfg);
+    }
+
     int cache_layer_idx = state->layer_to_attn_idx[layer_idx];
     if (cache_layer_idx < 0) cache_layer_idx = 0;
 

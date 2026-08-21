@@ -32,6 +32,25 @@ void sampler_apply_repetition_penalty(float *logits, int vocab_size, const int *
     }
 }
 
+void sampler_apply_presence_penalty(float *logits, int vocab_size, const int *seen_tokens, int num_seen, float presence_penalty) {
+    if (presence_penalty == 0.0f || !seen_tokens || num_seen <= 0) return;
+    for (int i = 0; i < num_seen; i++) {
+        int tid = seen_tokens[i];
+        if (tid >= 0 && tid < vocab_size) {
+            int first_seen = 1;
+            for (int j = 0; j < i; j++) {
+                if (seen_tokens[j] == tid) {
+                    first_seen = 0;
+                    break;
+                }
+            }
+            if (first_seen) {
+                logits[tid] -= presence_penalty;
+            }
+        }
+    }
+}
+
 // ─── Sampler state ─────────────────────────────────────────────────────────
 
 typedef struct {

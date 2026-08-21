@@ -613,6 +613,152 @@ int diskllm_eval(diskllm_context *ctx, const int *tokens, int n_tokens, float *l
     return 0;
 }
 
+int diskllm_eval_multimodal(diskllm_context *ctx, const int *tokens, int n_tokens, int img_pad_pos, const float *visual_embeddings, int n_patches, float *logits) {
+    if (!ctx || !tokens || n_tokens <= 0 || !logits) return -1;
+    if (!visual_embeddings || n_patches <= 0 || img_pad_pos < 0 || img_pad_pos >= n_tokens) {
+        return diskllm_eval(ctx, tokens, n_tokens, logits);
+    }
+
+    diskllm_model *model = ctx->model;
+    qwen_model_config *cfg = model->cfg;
+    scratch_buffers *scratch = ctx->scratch;
+
+    /* Total tokens = (n_tokens - 1) text tokens + n_patches visual tokens */
+    int total_tokens = n_tokens - 1 + n_patches;
+    ctx->prompt_len = total_tokens;
+    ctx->cur_pos = total_tokens;
+    ctx->t_prefill_start = diskllm_get_time_ms();
+
+    float *hidden_states = malloc((size_t)total_tokens * cfg->hidden_dim * sizeof(float));
+    if (!hidden_states) return -1;
+
+    int out_pos = 0;
+
+    /* 1. Text tokens before image_pad */
+    for (int p = 0; p < img_pad_pos; p++) {
+        int tok = tokens[p];
+        float *h = hidden_states + (out_pos++) * cfg->hidden_dim;
+        if (model->g_mmap_full) {
+            const uint8_t *row_ptr = model->g_mmap_full + model->ti_emb->absolute_offset + (uint64_t)tok * model->embed_row_bytes;
+            dequantize_row(h, row_ptr, cfg->hidden_dim, model->ti_emb->type);
+        } else {
+            uint8_t *row_buf = malloc(model->embed_row_bytes);
+            exact_pread(model->fd, row_buf, model->embed_row_bytes, model->ti_emb->absolute_offset + (uint64_t)tok * model->embed_row_bytes);
+            dequantize_row(h, row_buf, cfg->hidden_dim, model->ti_emb->type);
+            free(row_buf);
+            ctx->bytes_read += model->embed_row_bytes;
+        }
+    }
+
+    /* 2. Visual patch embeddings */
+    for (int p = 0; p < n_patches; p++) {
+        float *h = hidden_states + (out_pos++) * cfg->hidden_dim;
+        memcpy(h, visual_embeddings + (size_t)p * cfg->hidden_dim, (size_t)cfg->hidden_dim * sizeof(float));
+    }
+
+    /* 3. Text tokens after image_pad */
+    for (int p = img_pad_pos + 1; p < n_tokens; p++) {
+        int tok = tokens[p];
+        float *h = hidden_states + (out_pos++) * cfg->hidden_dim;
+        if (model->g_mmap_full) {
+            const uint8_t *row_ptr = model->g_mmap_full + model->ti_emb->absolute_offset + (uint64_t)tok * model->embed_row_bytes;
+            dequantize_row(h, row_ptr, cfg->hidden_dim, model->ti_emb->type);
+        } else {
+            uint8_t *row_buf = malloc(model->embed_row_bytes);
+            exact_pread(model->fd, row_buf, model->embed_row_bytes, model->ti_emb->absolute_offset + (uint64_t)tok * model->embed_row_bytes);
+            dequantize_row(h, row_buf, cfg->hidden_dim, model->ti_emb->type);
+            free(row_buf);
+            ctx->bytes_read += model->embed_row_bytes;
+        }
+    }
+
+    float emb_scale = (cfg->model_type == MODEL_TYPE_GEMMA || cfg->model_type == MODEL_TYPE_GEMMA2 || cfg->model_type == MODEL_TYPE_GEMMA3 || cfg->model_type == MODEL_TYPE_GEMMA4) ? sqrtf((float)cfg->hidden_dim) : 1.0f;
+    if (emb_scale != 1.0f) {
+        for (int i = 0; i < total_tokens * cfg->hidden_dim; i++) {
+            hidden_states[i] *= emb_scale;
+        }
+    }
+
+    /* Layer-by-layer forward pass */
+    if (model->g_mmap_full) {
+        layer_block_weights_internal blk;
+        for (int li = 0; li < cfg->block_count; li++) {
+            load_layer_block_weights_mmap(model->catalog, cfg, li, model->g_mmap_full, &blk);
+            if (model->arch_backend && model->arch_backend->prefill_layer) {
+                model->arch_backend->prefill_layer(ctx, li, &blk, hidden_states, total_tokens);
+            }
+        }
+    } else {
+        uint8_t *bufs[2] = {ctx->layer_buf_a, ctx->layer_buf_b};
+        layer_block_weights_internal blks[2];
+        int abuf = 0;
+        uint64_t lb = 0;
+
+        load_layer_block_weights(model->fd, model->catalog, cfg, 0, bufs[0], &blks[0], &lb);
+        ctx->bytes_read += lb;
+
+        pthread_t pth;
+        prefetch_args pargs;
+        int pth_active = 0;
+
+        for (int li = 0; li < cfg->block_count; li++) {
+            if (li + 1 < cfg->block_count) {
+                pargs = (prefetch_args){.fd=model->fd, .cat=model->catalog, .cfg=cfg, .layer_idx=li+1,
+                                        .buf=bufs[1-abuf], .blk=&blks[1-abuf], .bytes_read=0, .status=-1};
+                pth_active = (pthread_create(&pth, NULL, prefetch_thread_fn, &pargs) == 0);
+                if (!pth_active) {
+                    pargs.bytes_read = 0;
+                    load_layer_block_weights(model->fd, model->catalog, cfg, li+1, bufs[1-abuf], &blks[1-abuf], &pargs.bytes_read);
+                }
+            } else { pth_active = 0; }
+
+            layer_block_weights_internal *blk = &blks[abuf];
+            if (model->arch_backend && model->arch_backend->prefill_layer) {
+                model->arch_backend->prefill_layer(ctx, li, blk, hidden_states, total_tokens);
+            }
+
+            if (pth_active) {
+                pthread_join(pth, NULL);
+                ctx->bytes_read += pargs.bytes_read;
+            } else if (li + 1 < cfg->block_count) {
+                ctx->bytes_read += pargs.bytes_read;
+            }
+            abuf = 1 - abuf;
+        }
+    }
+
+    /* Final norm & logits on last token position */
+    float *last_h = hidden_states + (total_tokens - 1) * cfg->hidden_dim;
+    int add_one = (cfg->model_type == MODEL_TYPE_GEMMA) ? 1 : 0;
+    rmsnorm_ext(last_h, last_h, model->output_norm, cfg->hidden_dim, 1e-6f, add_one);
+
+    if (model->mmap_output_weight) {
+        matvec(logits, model->mmap_output_weight, last_h, cfg->hidden_dim, cfg->vocab_size, model->ti_outw->type, NULL);
+    } else {
+        int64_t rows_done = 0, chunk_rows = 15000;
+        uint8_t *cbuf = scratch->stream_buffer;
+        while (rows_done < cfg->vocab_size) {
+            int64_t r = cfg->vocab_size - rows_done;
+            if (r > chunk_rows) r = chunk_rows;
+            exact_pread(model->fd, cbuf, r * model->logit_row_bytes, model->ti_outw->absolute_offset + rows_done * model->logit_row_bytes);
+            ctx->bytes_read += r * model->logit_row_bytes;
+            matvec(logits + rows_done, cbuf, last_h, cfg->hidden_dim, r, model->ti_outw->type, NULL);
+            rows_done += r;
+        }
+    }
+
+    if (cfg->final_logit_softcapping > 0.0f) {
+        float cap = cfg->final_logit_softcapping;
+        for (int i = 0; i < cfg->vocab_size; i++) logits[i] = cap * tanhf(logits[i] / cap);
+    }
+
+    free(hidden_states);
+    ctx->t_prefill_end = diskllm_get_time_ms();
+    ctx->decode_start_bytes_read = ctx->bytes_read;
+    ctx->peak_rss = diskllm_read_rss_mb();
+    return 0;
+}
+
 int diskllm_decode_step(diskllm_context *ctx, int token, float *logits) {
     if (!ctx || !logits) return -1;
 
