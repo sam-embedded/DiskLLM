@@ -1,0 +1,4 @@
+root ::= "{" ws "\"bbox_2d\":" ws "[" ws int "," ws int "," ws int "," ws int ws "]," ws "\"text_content\":" ws string "}"
+string ::= "\"" [a-zA-Z0-9. ,:\-_]* "\""
+int ::= [0-9]+
+ws ::= [ \t\n\r]*

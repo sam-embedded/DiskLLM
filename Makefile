@@ -17,7 +17,7 @@ SRCS_CORE = src/attention.c src/ssm.c src/dequant.c src/rmsnorm.c \
             src/tensor_catalog.c src/layer_map.c src/sampler.c src/stream.c \
             src/tokenizer.c src/speculative.c src/vulkan_backend.c \
             src/core/model.c src/core/context.c src/core/tokenizer_api.c src/core/sampler_api.c \
-            src/core/vision.c \
+            src/core/vision.c src/core/grammar.c \
             src/core/arch/registry.c src/core/arch/qwen35.c src/core/arch/qwen2.c src/core/arch/llama.c \
             src/core/arch/phi3.c src/core/arch/gemma.c src/core/arch/gemma2.c src/core/arch/gemma3.c src/core/arch/gemma4.c src/core/arch/mistral.c
 
@@ -86,4 +86,7 @@ test_web_image: tools/test_web_image.c $(SRCS_CORE)
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
 
 test_qwen35_vision: tools/test_qwen35_vision.c $(SRCS_CORE)
+	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)
+
+test_grammar_unit: tools/test_grammar_unit.c src/core/grammar.c
 	$(CC) $(ALL_CFLAGS) $^ -o $@ $(LFLAGS)

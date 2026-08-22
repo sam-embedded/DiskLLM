@@ -39,8 +39,18 @@ void diskllm_sampler_free(diskllm_sampler *smp) {
     free(smp);
 }
 
-int diskllm_sample(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen) {
+static const char *get_token_string_cb(void *ctx, int token_id) {
+    const diskllm_tokenizer *tok = (const diskllm_tokenizer *)ctx;
+    if (!tok || !tok->tok) return NULL;
+    return tokenizer_decode_raw(tok->tok, token_id);
+}
+
+int diskllm_sample_grammar(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen, diskllm_grammar *grammar, const diskllm_tokenizer *tok, int eos_token_id) {
     if (!smp || !smp->smp || !logits || vocab_size <= 0) return 0;
+
+    if (grammar && tok) {
+        diskllm_grammar_apply_mask(grammar, logits, vocab_size, (void *)tok, get_token_string_cb, eos_token_id);
+    }
 
     if (smp->params.presence_penalty != 0.0f && seen_tokens && n_seen > 0) {
         sampler_apply_presence_penalty(logits, vocab_size, seen_tokens, n_seen, smp->params.presence_penalty);
@@ -50,5 +60,18 @@ int diskllm_sample(diskllm_sampler *smp, float *logits, int vocab_size, const in
         sampler_apply_repetition_penalty(logits, vocab_size, seen_tokens, n_seen, smp->params.repeat_penalty);
     }
 
-    return sampler_sample(smp->smp, logits, vocab_size);
+    int chosen_tok = sampler_sample(smp->smp, logits, vocab_size);
+
+    if (grammar && tok && chosen_tok != eos_token_id) {
+        const char *tstr = tokenizer_decode_raw(tok->tok, chosen_tok);
+        if (tstr) {
+            diskllm_grammar_advance(grammar, tstr);
+        }
+    }
+
+    return chosen_tok;
+}
+
+int diskllm_sample(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen) {
+    return diskllm_sample_grammar(smp, logits, vocab_size, seen_tokens, n_seen, NULL, NULL, -1);
 }

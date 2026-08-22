@@ -10,19 +10,20 @@ It enables executing large language models and vision-language models—ranging 
 
 ## 🌟 New in v4.0.0: Multimodal Vision Support
 
+- **Grammar-Constrained Decoding (GBNF & JSON Mode)**: Enforces strict structured JSON/GBNF schema constraints at the sampler level by dynamically masking invalid token logits to `-INFINITY`.
 - **Native Vision Transformer (ViT) & Multi-Architecture Projector**: Built-in pure C Vision Transformer encoder with patch Conv2D projection, self-attention, and spatial merge MLP projectors (`mm.0` -> GELU -> `mm.2`).
 - **Vision-Language Models (VLMs)**: Full support for **Qwen 3.5 VL** and **Qwen 2.5 VL** multimodal image understanding and OCR.
 - **Single-Header Image Decoding (`stb_image`)**: Decodes JPEG/PNG image files with automatic bilinear resizing and channel normalization into flat RGB tensors.
 - **Multimodal Visual Token Injection**: Delivers seamless visual embedding replacement at `<|image_pad|>` token placeholders during prompt prefill.
 
-### Running a Vision-Language Model (VLM):
+### Running a Vision-Language Model with Grammar Constraints:
 ```bash
 ./diskllm-cli \
     --model /path/to/Qwen3.5-0.8B-Q4_K_M.gguf \
     --mmproj /path/to/mmproj-Qwen3.5-0.8B-F16.gguf \
     --image /path/to/image.jpg \
-    --chat \
-    --prompt "Extract the text from this image." \
+    --prompt "Extract the text and bounding box as strict JSON." \
+    --grammar-file tests/grammars/receipt.gbnf \
     --threads 4
 ```
 

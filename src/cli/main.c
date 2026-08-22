@@ -27,6 +27,8 @@ static void print_usage(const char *prog_name) {
     printf("  --min-p <float>             Min-P threshold (default: 0.05)\n");
     printf("  --repeat-penalty <float>    Repetition penalty (default: 1.0)\n");
     printf("  --presence-penalty <float>  Presence penalty (default: 0.0)\n");
+    printf("  --grammar-file <path>       Path to GBNF grammar file for constrained decoding\n");
+    printf("  --json-schema               Force valid JSON output grammar\n");
     printf("  --thinking                  Enable thinking mode for reasoning models (e.g. Qwen 3.5)\n");
     printf("  --preset <name>             Sampling preset (qwen-non-thinking-text, qwen-thinking-text, qwen-coding, qwen-vl)\n");
     printf("  --image <path>              Image file path / URL to feed to multimodal vision prompt\n");
@@ -86,6 +88,9 @@ int main(int argc, char **argv) {
     bool debug_hidden_norm = false;
     bool logits_summary = false;
 
+    char *grammar_file = NULL;
+    bool force_json_schema = false;
+
     static struct option long_options[] = {
         {"model",             required_argument, 0, 'm'},
         {"arch",              required_argument, 0, 'a'},
@@ -107,6 +112,8 @@ int main(int argc, char **argv) {
         {"min-p",             required_argument, 0, 'M'},
         {"repeat-penalty",    required_argument, 0, 'R'},
         {"presence-penalty",  required_argument, 0, 'E'},
+        {"grammar-file",      required_argument, 0, 1012},
+        {"json-schema",       no_argument,       0, 1013},
         {"thinking",          no_argument,       0, 1003},
         {"think",             no_argument,       0, 1003},
         {"preset",            required_argument, 0, 1004},
@@ -141,6 +148,8 @@ int main(int argc, char **argv) {
             case 1009: fim_file = optarg; break;
             case 1010: image_path = optarg; is_chat = true; break;
             case 1011: mmproj_path = optarg; break;
+            case 1012: grammar_file = optarg; break;
+            case 1013: force_json_schema = true; break;
             case '1': prompt_ids_str = optarg; break;
             case '2': prompt_ids_file = optarg; break;
             case 'n': max_tokens = atoi(optarg); break;
@@ -338,6 +347,16 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Initialize grammar constraint if requested */
+    diskllm_grammar *grammar = NULL;
+    if (grammar_file) {
+        grammar = diskllm_grammar_init_from_file(grammar_file);
+        if (grammar && !quiet) printf("[INFO] Loaded GBNF grammar from %s\n", grammar_file);
+    } else if (force_json_schema) {
+        grammar = diskllm_grammar_init_json();
+        if (grammar && !quiet) printf("[INFO] Initialized JSON Mode grammar constraint\n");
+    }
+
     /* Initialize sampler */
     diskllm_sampler_params sparams = diskllm_sampler_params_default();
     sparams.temp = greedy ? 0.0f : temp;
@@ -348,11 +367,10 @@ int main(int argc, char **argv) {
     sparams.presence_penalty = presence_penalty;
 
     diskllm_sampler *smp = diskllm_sampler_init(sparams);
+    uint32_t eos_id = diskllm_model_get_eos_id(model);
 
     /* Sample first token from prefill logits */
-    int next_tok = diskllm_sample(smp, logits, vocab_size, prompt_tokens, prompt_len);
-
-    uint32_t eos_id = diskllm_model_get_eos_id(model);
+    int next_tok = diskllm_sample_grammar(smp, logits, vocab_size, prompt_tokens, prompt_len, grammar, tok, eos_id);
 
     printf("\n\033[1;32m[STREAM]\033[0m ");
     char piece[256];
@@ -368,13 +386,15 @@ int main(int argc, char **argv) {
         gen_tokens[gen_count++] = next_tok;
 
         diskllm_decode_step(ctx, next_tok, logits);
-        next_tok = diskllm_sample(smp, logits, vocab_size, gen_tokens, gen_count);
+        next_tok = diskllm_sample_grammar(smp, logits, vocab_size, gen_tokens, gen_count, grammar, tok, eos_id);
 
         diskllm_decode_token(tok, next_tok, false, piece, sizeof(piece));
         printf("%s", piece);
         fflush(stdout);
     }
     printf("\n");
+
+    if (grammar) diskllm_grammar_free(grammar);
 
     /* Execution Summary */
     if (!quiet) {

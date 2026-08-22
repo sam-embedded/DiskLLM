@@ -115,11 +115,24 @@ int              diskllm_decode_step(diskllm_context *ctx, int token, float *log
 /* Get performance metrics for execution summary */
 diskllm_perf_metrics diskllm_get_perf_metrics(const diskllm_context *ctx);
 
+/* ─── Grammar-Constrained Decoding API ─────────────────────────────────────── */
+
+typedef struct diskllm_grammar diskllm_grammar;
+
+diskllm_grammar *diskllm_grammar_init_from_file(const char *filepath);
+diskllm_grammar *diskllm_grammar_init_from_str(const char *grammar_str);
+diskllm_grammar *diskllm_grammar_init_json(void);
+void             diskllm_grammar_free(diskllm_grammar *g);
+void             diskllm_grammar_reset(diskllm_grammar *g);
+void             diskllm_grammar_advance(diskllm_grammar *g, const char *piece);
+bool             diskllm_grammar_is_finished(const diskllm_grammar *g);
+
 /* ─── Sampler API ──────────────────────────────────────────────────────────── */
 
 diskllm_sampler *diskllm_sampler_init(diskllm_sampler_params params);
 void             diskllm_sampler_free(diskllm_sampler *smp);
 int              diskllm_sample(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen);
+int              diskllm_sample_grammar(diskllm_sampler *smp, float *logits, int vocab_size, const int *seen_tokens, int n_seen, diskllm_grammar *grammar, const diskllm_tokenizer *tok, int eos_token_id);
 
 /* ─── State Persistence API ────────────────────────────────────────────────── */
 

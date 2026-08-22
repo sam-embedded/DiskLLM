@@ -22,6 +22,7 @@
 #include "dequant.h"
 #include "attention.h"
 #include "ssm.h"
+#include "grammar.h"
 #include "arch/registry.h"
 #include <stdio.h>
 #include <stdlib.h>
